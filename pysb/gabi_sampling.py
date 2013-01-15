@@ -232,6 +232,34 @@ def compare_data(xparray, simarray, xspairlist, vardata=False):
     #print "OBJOUT(total):", objout
     return numpy.asarray(objout)
 
+def getgauss(sobolarr, params, gaussians, sdrange):
+    """ map a set of sobol pseudo-random numbers to a range for parameter evaluation
+    # sobol: sobol number array of the appropriate length
+    # params: array of model parameters
+    # gaussians: tuple of 2-tuples containing Gaussian mean and variance
+    # sdrange: integer number of standard deviations around the mean
+      to map to the sobol range, i.e. all samples will be drawn from +/-
+      sdrange/2 standard deviations from the mean
+    """
+
+    sobprmarr = numpy.zeros_like(sobolarr)
+    ub = numpy.zeros(len(params))
+    lb = numpy.zeros(len(params))
+    # set upper/lower bounds for generic problem
+    for i in range(len(params)):
+        if i in useparams:
+            ub[i] = params[i] * pow(10,usemag)
+            lb[i] = params[i] / pow(10,usemag)
+        else:
+            ub[i] = params[i] * pow(10, omag)
+            lb[i] = params[i] / pow(10, omag)
+    
+    # see  for more info http://en.wikipedia.org/wiki/Exponential_family
+    sobprmarr = lb*(ub/lb)**sobolarr # map the [0..1] sobol array to values sampled over their omags
+
+    # sobprmarr is the N x len(params) array for sobol analysis
+    return sobprmarr
+
 def getlog(sobolarr, params, omag=1, useparams=[], usemag=None):
     # map a set of sobol pseudo-random numbers to a range for parameter evaluation
     # sobol: sobol number array of the appropriate length
