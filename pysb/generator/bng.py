@@ -91,7 +91,8 @@ class BngGenerator(object):
         max_length = max(len(name) for name in self.model.observables.keys())
         self.__content += "begin observables\n"
         for obs in self.model.observables:
-            observable_code = format_reactionpattern(obs.reaction_pattern)
+            observable_code = format_reactionpattern(obs.reaction_pattern,
+                                                     for_observable=True)
             self.__content += ("  Molecules %-" + str(max_length) + "s   %s\n") % (obs.name, observable_code)
         self.__content += "end observables\n\n"
 
@@ -115,8 +116,12 @@ def format_monomer_site(monomer, site):
             ret += '~' + state
     return ret
 
-def format_reactionpattern(rp):
-    return ' + '.join([format_complexpattern(cp) for cp in rp.complex_patterns])
+def format_reactionpattern(rp, for_observable=False):
+    if for_observable is False:
+        delimiter = ' + '
+    else:
+        delimiter = ' '
+    return delimiter.join([format_complexpattern(cp) for cp in rp.complex_patterns])
 
 def format_complexpattern(cp):
     ret = '.'.join([format_monomerpattern(mp) for mp in cp.monomer_patterns])
@@ -156,8 +161,13 @@ def format_site_condition(site, state):
             state = (state[0], '?')
         state_code = '~%s!%s' % state
     # one or more unspecified bonds
-    elif state == pysb.ANY:
+    elif state is pysb.ANY:
         state_code = '!+'
+    # anything at all (usually you can leverage don't-care-don't-write, but in
+    # some cases such as when a rule explicitly sets the state of site A but
+    # conditions on site B, site A on the reactant side must be set to WILD)
+    elif state is pysb.WILD:
+        state_code = '!?'
     else:
         raise Exception("BNG generator has encountered an unknown element in a rule pattern site condition.")
     return '%s%s' % (site, state_code)

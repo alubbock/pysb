@@ -62,15 +62,27 @@ class test(distutils.cmd.Command):
         pass
     def run(self):
         import nose
-        config = nose.config.Config(exclude=[re.compile('examples')],
+        from nose.plugins.manager import DefaultPluginManager
+        excludes = [r'^examples$', r'^deprecated$']
+        config = nose.config.Config(exclude=map(re.compile, excludes),
+                                    plugins=DefaultPluginManager(),
                                     env=os.environ)
-        nose.run(defaultTest='pysb', config=config, argv=[''])
+        nose.run(defaultTest='pysb', config=config, argv=['', '--with-doctest'])
 
 class GitError(Exception):
     pass
 
 def get_version():
     """Get a nice version number from git-describe"""
+
+    # ensure that we are working in a pysb git repo
+    setup_path = os.path.abspath(os.path.dirname(__file__))
+    if not os.path.exists(os.path.join(setup_path, '.git')):
+        raise Exception("setup.py is not in the root of a git repository; "
+                        "aborting")
+    os.chdir(setup_path)
+
+    # run git describe
     gitcmd = ['git', 'describe', '--always', '--abbrev=4']
     try:
         gitproc = subprocess.Popen(gitcmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
