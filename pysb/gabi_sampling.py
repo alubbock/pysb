@@ -1,9 +1,7 @@
 import pysb.bng
 import numpy 
-import sympy 
 import re 
 import ctypes
-import csv
 import scipy.interpolate
 import sys
 #from pysundials import cvode
@@ -232,30 +230,38 @@ def compare_data(xparray, simarray, xspairlist, vardata=False):
     #print "OBJOUT(total):", objout
     return numpy.asarray(objout)
 
-def getgauss(sobolarr, params, gaussians, sdrange):
+def getgauss(sobolarr, params, standard_devs):
     """ map a set of sobol pseudo-random numbers to a range for parameter evaluation
     # sobol: sobol number array of the appropriate length
     # params: array of model parameters
-    # gaussians: tuple of 2-tuples containing Gaussian mean and variance
-    # sdrange: integer number of standard deviations around the mean
-      to map to the sobol range, i.e. all samples will be drawn from +/-
-      sdrange/2 standard deviations from the mean
+    # standard_devs: standard deviations for each parameter, or a single
+    # value to use for all parameters. 66% of values lie in range +- SD,
+    # 95% in range SD/2
     """
 
     sobprmarr = numpy.zeros_like(sobolarr)
-    ub = numpy.zeros(len(params))
-    lb = numpy.zeros(len(params))
+    #ub = numpy.zeros(len(params))
+    #lb = numpy.zeros(len(params))
+
+    from rpy2.robjects import FloatVector
+    from rpy2.robjects.packages import importr
+
+    # use R's qnorm inverse Gaussian transform
+    qnorm = importr('stats').qnorm
+    
+    sobprmarr = [params*numpy.array(qnorm(FloatVector(sv),mean=1,sd=standard_devs)) for sv in sobolarr]
+
     # set upper/lower bounds for generic problem
-    for i in range(len(params)):
-        if i in useparams:
-            ub[i] = params[i] * pow(10,usemag)
-            lb[i] = params[i] / pow(10,usemag)
-        else:
-            ub[i] = params[i] * pow(10, omag)
-            lb[i] = params[i] / pow(10, omag)
+    # for i in range(len(params)):
+    #     if i in useparams:
+    #         ub[i] = params[i] * pow(10,usemag)
+    #         lb[i] = params[i] / pow(10,usemag)
+    #     else:
+    #         ub[i] = params[i] * pow(10, omag)
+    #         lb[i] = params[i] / pow(10, omag)
     
     # see  for more info http://en.wikipedia.org/wiki/Exponential_family
-    sobprmarr = lb*(ub/lb)**sobolarr # map the [0..1] sobol array to values sampled over their omags
+#    sobprmarr = lb*(ub/lb)**sobolarr # map the [0..1] sobol array to values sampled over their omags
 
     # sobprmarr is the N x len(params) array for sobol analysis
     return sobprmarr
@@ -520,10 +526,9 @@ def sample(model,n,tfinal=20000,nsteps=1000):
     numparam = len(model.initial_conditions)
     sobgen = QuantLib.SobolRsg(numparam, 64)
     sobvals = [sobgen.nextSequence().value() for i in range(n)]
-    # rescale the sobol vales
-    sobvals_scaled = getlog(sobvals,params.values())
-    
-    finalstepnum = nsteps-1
+    # map the sobol values to Gaussian using R's inverse CDF
+    # and multiply them
+    sobvals_scaled = getgauss(sobvals,params.values(),0.125)
     
     finalquants = numpy.zeros((n,len(model.observables)))
 
@@ -536,11 +541,11 @@ def sample(model,n,tfinal=20000,nsteps=1000):
         # sample from model
         [envlist,modelparms] = odeinit(model,nsteps=nsteps)
         [xyobs,xout,yout,yobs] = odesolve(model,tfinal,envlist,modelparms)
-        finalquants[i] = [y[finalstepnum] for y in yobs]
+        finalquants[i] = [y[nsteps - 1] for y in yobs]
 
     return finalquants
 
-if __name__=="main":
+if __name__ == "__main__":
      model = simple_egfr.model
-     smp = sample(model,100)
-     numpy.savetxt('/home/alex/Desktop/gabi_sampling_test1.csv', smp, delimiter=',')
+     smp = sample(model,10)
+     numpy.savetxt('gabi_sampling_test.csv', smp, delimiter=',')
