@@ -8,7 +8,8 @@ import sys
 from scipy.integrate import odeint
 import QuantLib
 from pysb.examples import simple_egfr
-import pysb
+from pysb import integrate
+import random
 
 # Thee set of functions set up the system for annealing runs
 # and provide the runner function as input to annealing
@@ -510,6 +511,9 @@ def writetofile(fout, simparms, simdata, temperature):
 def extract_initial_params(model):
     return dict([(x.name,x.value) for x in model.parameters_initial_conditions().values()])
 
+def extract_all_params(model):
+    return dict(zip(model.parameters.keys(), [x.value for x in model.parameters.values()]))
+
 def set_initial_params(model, params):
     for i in range(len(model.initial_conditions)):
         for j in range(len(model.initial_conditions[i])):
@@ -519,17 +523,22 @@ def set_initial_params(model, params):
                     params[model.initial_conditions[i][j].name]
     return model
 
-def sample(model,n,tfinal=20000,nsteps=1000):
+def set_parameters(model, params):
+    for p in params.keys():
+        model.parameters[p].value = params[p]
+    return model
+
+def sample(model,n,tfinal=30000,nsteps=1000):
     params = extract_initial_params(model)
     param_names = params.keys()
 
-    numparam = len(model.initial_conditions)
+    numparam = len(params)
     sobgen = QuantLib.SobolRsg(numparam, 64)
     sobvals = [sobgen.nextSequence().value() for i in range(n)]
     # map the sobol values to Gaussian using R's inverse CDF
     # and multiply them
     sobvals_scaled = getgauss(sobvals,params.values(),0.125)
-    
+
     finalquants = numpy.zeros((n,len(model.observables)))
 
     for i in range(n):
@@ -539,11 +548,60 @@ def sample(model,n,tfinal=20000,nsteps=1000):
             params[param_names[j]] = s[j]
         model = set_initial_params(model, params)
         # sample from model
-        [envlist,modelparms] = odeinit(model,nsteps=nsteps)
-        [xyobs,xout,yout,yobs] = odesolve(model,tfinal,envlist,modelparms)
-        finalquants[i] = [y[nsteps - 1] for y in yobs]
+#        [envlist,modelparms] = odeinit(model,nsteps=nsteps)
+#        [xyobs,xout,yout,yobs] = odesolve(model,tfinal,envlist,modelparms)
+#        finalquants[i] = [y[nsteps - 1] for y in yobs]
+        t = numpy.linspace(0,tfinal,nsteps)
+        yout = pysb.integrate.odesolve(model, t)
+        finalquants[i] = [yout[k][nsteps - 1] for k in model.observables.keys()]
 
     return finalquants
+
+def sample_vary_all(model,n,knockouts=3,tfinal=30000,nsteps=1000):
+    params = extract_all_params(model)
+    param_names = params.keys()
+
+    numparam = len(params)
+    sobgen = QuantLib.SobolRsg(numparam, 64)
+    sobvals = [sobgen.nextSequence().value() for i in range(n)]
+    # map the sobol values to Gaussian using R's inverse CDF
+    # and multiply them
+    sobvals_scaled = getgauss(sobvals,params.values(),0.125)
+    
+#    finalquants = numpy.zeros((n,len(model.observables)))
+    t = numpy.linspace(0,tfinal,nsteps)
+
+    # open files
+    pfile = open('params.csv','wb')
+    ofile = open('observations.csv','wb')
+
+    # write headers
+    import csv
+    pcsv = csv.writer(pfile)
+    ocsv = csv.writer(ofile)
+    pcsv.writerow(params.keys())
+    ocsv.writerow(model.observables.keys())
+
+    for i in range(n):
+        # set parameters
+        s = sobvals_scaled[i]
+        for j in range(len(s)):
+            params[param_names[j]] = s[j]
+        # do knockouts
+        knockout_params = random.sample(params.keys(),knockouts)
+        for k in knockout_params:
+            params[k] = 0
+        model = set_parameters(model, params)
+        pcsv.writerow(params.values())
+        # sample from model
+        yout = integrate.odesolve(model, t)
+        ocsv.writerow([yout[k][nsteps - 1] for k in model.observables.keys()])
+#        finalquants[i] = [yout[k][nsteps - 1] for k in model.observables.keys()]
+
+    pfile.close()
+    ofile.close()
+
+#    return finalquants
 
 if __name__ == "__main__":
      model = simple_egfr.model
