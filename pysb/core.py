@@ -253,7 +253,12 @@ class Monomer(Component):
         return  '%s(name=%s, sites=%s, site_states=%s)' % \
             (self.__class__.__name__, repr(self.name), repr(self.sites), repr(self.site_states))
 
-    
+    def __eq__(self, other):
+        return type(self)         == type(other)         and \
+               self.name          == other.name          and \
+               ((self.sites is None and other.sites is None) or \
+               (sorted(self.sites) == sorted(other.sites))) and \
+               self.site_states   == other.site_states
 
 class MonomerAny(Monomer):
 
@@ -453,6 +458,11 @@ class MonomerPattern(object):
             value += ' ** ' + self.compartment.name
         return value
 
+    def __eq__(self, other):
+        return type(self)           == type(other)           and \
+               self.monomer         == other.monomer         and \
+               self.site_conditions == other.site_conditions and \
+               self.compartment     == other.compartment
 
 
 class ComplexPattern(object):
@@ -720,6 +730,10 @@ class Parameter(Component):
     def __repr__(self):
         return  '%s(name=%s, value=%s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
 
+    def __eq__(self, other):
+        return type(self) == type(other) and \
+               self.name  == other.name  and \
+               self.value == other.value
 
 
 class Compartment(Component):
@@ -773,6 +787,11 @@ class Compartment(Component):
         return  '%s(name=%s, parent=%s, dimension=%s, size=%s)' % \
             (self.__class__.__name__, repr(self.name), repr(self.parent), repr(self.dimension), repr(self.size))
 
+    def __eq__(self, other):
+        return type(self)  == type(other)  and \
+               self.name   == other.name   and \
+               self.parent == other.parent and \
+               self.size   == other.size
 
 
 class Rule(Component):
