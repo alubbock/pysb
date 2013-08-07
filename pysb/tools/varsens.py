@@ -3,17 +3,19 @@ import pysb.bng
 import ghalton
 import numpy
 import sys
+from sobol_Seq import i4_sobol_generate
 
-def varsens(model, solver, objective, k, n, scaling, log_scaling=False, verbose=True):
-    if verbose: print "Generating Halton sequences"
+def varsens(objective, k, n, scaling, log_scaling=False, verbose=True):
+    if verbose: print "Generating Halton/Sobol sequences"
     seq = ghalton.Halton(k) # half for A, and half for B
-    seq.get(2*(k*k-k)) # Burn away any face exploration off the Halton
+    #seq.get(2*(k*k-k)) # Burn away any face exploration off the Halton
     M_1  = scale(numpy.array(seq.get(n)), scaling, log_scaling)  # See Eq (9)
-    M_2  = scale(numpy.array(seq.get(n)), scaling, log_scaling)  # See Eq (9)
+    x = numpy.transpose(i4_sobol_generate(k, n, k+numpy.random.randint(2**14)))
+    M_2  = scale(x, scaling, log_scaling)
     N_j  = generate_N_j(M_1, M_2)                                # See Eq (11)
     N_nj = generate_N_j(M_2, M_1)
     
-    (fM_1, fM_2, fN_j, fN_nj) = objective_values(model, M_1, M_2, N_j, N_nj, objective, solver, verbose) 
+    (fM_1, fM_2, fN_j, fN_nj) = objective_values(M_1, M_2, N_j, N_nj, objective, verbose) 
     
     if verbose: print "Final sensitivity calculation"
     return getvarsens(fM_1, fM_2, fN_j, fN_nj)
@@ -48,7 +50,7 @@ def generate_N_j(M_1, M_2):
 
     return N_j
 
-def objective_values(model, M_1, M_2, N_j, N_nj, objective, solver, verbose=True): #, fileobj=None):
+def objective_values(M_1, M_2, N_j, N_nj, objective, verbose=True): #, fileobj=None):
     ''' Function parmeval calculates the fM_1, fM_2, and fN_j_i arrays needed for variance-based
     global sensitivity analysis as prescribed by Saltelli and derived from the work by Sobol
     (low-discrepancy sequences)
@@ -63,82 +65,53 @@ def objective_values(model, M_1, M_2, N_j, N_nj, objective, solver, verbose=True
     # First process the A and B matrices
     if verbose: print "Processing f(M_1):"
     for i in range(M_1.shape[0]):
-        fM_1[i]   = objective(solver(model, M_1[i]))
+        fM_1[i]   = objective(M_1[i])
         if verbose: move_spinner(i)
 
     if verbose: print "Processing f(M_2):"
     for i in range(M_2.shape[0]):
-        fM_2[i]   = objective(solver(model, M_2[i]))
+        fM_2[i]   = objective(M_2[i])
         if verbose: move_spinner(i)
 
     if verbose: print "Processing f(N_j)"
     for i in range(N_j.shape[0]):
         if verbose: print " * parameter %d"%i
         for j in range(N_j.shape[1]):
-            fN_j[i][j] = objective(solver(model, N_j[i][j]))
+            fN_j[i][j] = objective(N_j[i][j])
             if verbose: move_spinner(j)
 
     if verbose: print "Processing f(N_nj)"
     for i in range(N_j.shape[0]):
         if verbose: print " * parameter %d"%i
         for j in range(N_j.shape[1]):
-            fN_nj[i][j] = objective(solver(model, N_nj[i][j]))
+            fN_nj[i][j] = objective(N_nj[i][j])
             if verbose: move_spinner(j)
 
     return fM_1, fM_2, fN_j, fN_nj
 
 def getvarsens(fM_1, fM_2, fN_j, fN_nj):
-    """Calculate the array of S_i and ST_i for each parameter given fM_1, fM_2, fN_j matrices
-    from the multi-sampling runs. Calculate S_i and ST_i as follows:
-
-    Parameter sensitivity:
-    ----------------------
-            U_j - E^2 
-    S_j = ------------                   # Eq (10)
-               V(y)
-
-    U_j = 1/(n-1) \sum fM_1 * fN_j       # Eq (12)
-
-    E^2 = 1/n \sum fM_1 * fM_2           # Eq (21)
-
-    Total effect sensitivity (i.e. non additive part):
-    --------------------------------------------------
-                  U_-j - E^2
-     ST_j = 1 - -------------            # Eq (27)
-                      V(y)
-
-    U_-j = 1/(n-1) \sum fM_2 * fN_j
-
-
-    In both cases, calculate V(y) from fM_1 and fM_2
-
-
-    """
-
     nparms   = fN_j.shape[0] # should be the number of parameters
     nsamples = fN_j.shape[1] # should be the number of samples from the original matrix
 
     E_2 = sum(fM_1*fM_2) / nsamples      # Eq (21)
 
-    # Estimate 
+    # Estimate U_j and U_-j values and store them 
     U_j  = numpy.sum(fM_1 * fN_j,  axis=1) / (nsamples - 1)  # Eq (12)
     U_nj = numpy.sum(fM_1 * fN_nj, axis=1) / (nsamples - 1)  # Eq (unnumbered one after 18)
 
-    #estimate V(y) from fM_1 and fM_2
-
-    varfM_1 = numpy.var(fM_1, axis=0, ddof=1)
-    varfM_2 = numpy.var(fM_2, axis=0, ddof=1)
+    #estimate V(y) from fM_1 and fM_2, paper uses only fM_1, this is a better estimate
+    var_y = (numpy.var(fM_1, axis=0, ddof=1)+numpy.var(fM_2, axis=0, ddof=1))/2.0
 
     #allocate the S_i and ST_i arrays
     Sens  = numpy.zeros(nparms)
     SensT = numpy.zeros(nparms)
 
-    # now get the U_j and U_-j values and store them 
+    # now get the S_i and ST_i, Eq (27) & Eq (28)
     for j in range(nparms):
-        Sens[j]  =       (U_j[j]  - E_2)/varfM_1
-        SensT[j] = 1.0 - (U_nj[j] - E_2)/varfM_1
+        Sens[j]  =       ((U_j[j] - E_2) / var_y)
+        SensT[j] = 1.0 - ((U_nj[j]- E_2) / var_y)
 
-    return Sens, SensT
+    return Sens, SensT, var_y, E_2
 
 
 # Working on a test function here
@@ -146,20 +119,22 @@ def getvarsens(fM_1, fM_2, fN_j, fN_nj):
 # This is defined on the range [0..1]
 # Eq (29)
 def g_function(x, a):
-    return numpy.prod([gi_function(i, xi, a) for xi,i in enumerate(x)])
+    return numpy.prod([gi_function(xi, a[i]) for i,xi in enumerate(x)])
 
-# Eq (30)
-def gi_function(xi, i, a):
-    return (abs(4*xi-2)+a[i]) / (1+a[i])
-
+# Eq (30), Validated
+def gi_function(xi, ai):
+    return (numpy.abs(4.0*xi-2.0)+ai) / (1.0+ai)
 
 model = [0, 0.5, 3, 9, 99, 99]
 
-# Analytical answer, Eq (34)
-answer = 1.0/(3.0* ((numpy.array(model) + 1.0)**2.0))
+# Analytical answer, Eq (34) divided by V(y), matches figure
+answer = 1.0/(3.0* ((numpy.array(model) + 1.0)**2.0))/0.567986
+numpy.round(answer, 3)
 
-def g_solver(model, params): return g_function(params, model)
 
-def g_objective(x): return x
+def g_objective(x): return g_function(x, model)
 
-v = varsens(model, g_solver, g_objective, 6, 1024, numpy.array([[0.0]*6, [1.0]*6]))
+v = varsens(g_objective, 6, 1024*50, numpy.array([[0.0]*6, [1.0]*6]))
+
+# http://www.jstor.org/stable/pdfplus/2676831.pdf
+#from numpy.polynomial.legendre import legval
