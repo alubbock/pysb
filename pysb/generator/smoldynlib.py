@@ -97,7 +97,9 @@ class SmoldynlibGenerator(object):
         for m in self.model.monomers:
             #print "smolAddSpecies(<addr>, %s, '')" % m.name
             smolAddSpecies(self.sim, m.name, "")
-            smolSetSpeciesMobility(self.sim, m.name, MolecState.ALL, m.difc, 0, 0)
+            difc = m.difc
+            if difc == None: difc = 1
+            smolSetSpeciesMobility(self.sim, m.name, MolecState.ALL, difc, 0, 0)
 
     def generate_species(self):
         if not self.model.initial_conditions:
