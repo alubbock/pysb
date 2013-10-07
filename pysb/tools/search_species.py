@@ -57,7 +57,7 @@ def initial_condition_monomer_patterns(model):
     # Extract Monomers from ComplexPatterns
     return remove_duplicates_by_eq(complex_patterns_to_monomer_patterns(ic_complex_patterns))
 
-def find_monomers_in_species(monomer_list, model, verbose=True):
+def find_monomers_in_species(monomer_list, model, verbose=False):
     """
     Given a list of MonomerPatterns, returns a list of species which
     contain those patterns
@@ -73,20 +73,27 @@ def find_monomers_in_species(monomer_list, model, verbose=True):
         warn('Model species list is empty. Perhaps you need to generate equations?')
 
     species_ids = []
+    species_ids_nested = []
     for i,m in enumerate(monomer_list):
         # get the species IDs of MonomerPatterns which are
         # in the species list by matching the Monomer objects
         s_ids = [si for si,s in enumerate(model.species) if m.monomer in [sp.monomer for sp in s.monomer_patterns]]
+
         # Check that the matched MonomerPatterns have site_conditions
         # which are a subset of those in the species list MonomerPatterns
         s_ids = [si for si in s_ids if any([True for mp in model.species[si].monomer_patterns if m.monomer == mp.monomer and all(item in mp.site_conditions.items() or item[1] == pysb.ANY for item in m.site_conditions.items())])]
+
         # Save the matching IDs
         species_ids.extend(s_ids)
+        species_ids_nested.append(s_ids)
+
         if verbose:
-            print '%d %s found in species %s' % (i,str(m),s_ids)
+            print '%d %s found in species %s' % (i, str(m), s_ids)
 
-    return [s for i,s in enumerate(model.species) if i in species_ids]
+    return species_ids_nested
+#    return [s for i,s in enumerate(model.species) if i in species_ids]
 
+# Main method for demonstration
 if __name__ == "__main__":
     import pysb.examples.simple_egfr as egfr
     import pysb.bng
