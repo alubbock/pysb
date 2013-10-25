@@ -1,10 +1,15 @@
+import inspect
+import warnings
 import pysb
+import sympy
 
 
 class BngGenerator(object):
 
     def __init__(self, model):
         self.model = model
+        if self.model.has_synth_deg():
+            self.model.enable_synth_deg()
         self.__content = None
 
     def get_content(self):
@@ -13,21 +18,28 @@ class BngGenerator(object):
         return self.__content
 
     def generate_content(self):
-        if self.model.has_synth_deg():
-            self.model.enable_synth_deg()
         self.__content = ''
         self.generate_parameters()
         self.generate_compartments()
         self.generate_molecule_types()
-        self.generate_reaction_rules()
         self.generate_observables()
+        self.generate_functions()
         self.generate_species()
+        self.generate_reaction_rules()
 
     def generate_parameters(self):
+        exprs = self.model.expressions_constant()
+        if not self.model.parameters and not exprs:
+            return
         self.__content += "begin parameters\n"
-        max_length = max(len(p.name) for p in self.model.parameters)
+        max_length = max(len(p.name) for p in
+                         self.model.parameters | self.model.expressions)
         for p in self.model.parameters:
-            self.__content += ("  %-" + str(max_length) + "s   %e\n") % (p.name, p.value)
+            self.__content += (("  %-" + str(max_length) + "s   %e\n") %
+                               (p.name, p.value))
+        for e in exprs:
+            self.__content += (("  %-" + str(max_length) + "s   %s\n") %
+                               (e.name, sympy_to_muparser(e.expr)))
         self.__content += "end parameters\n\n"
 
     def generate_compartments(self):
@@ -47,6 +59,8 @@ class BngGenerator(object):
         self.__content += "end compartments\n\n"        
 
     def generate_molecule_types(self):
+        if not self.model.monomers:
+            return
         self.__content += "begin molecule types\n"
         for m in self.model.monomers:
             site_code = ','.join([format_monomer_site(m, s) for s in m.sites])
@@ -55,6 +69,7 @@ class BngGenerator(object):
 
     def generate_reaction_rules(self):
         if not self.model.rules:
+            warn_caller("Model does not contain any rules")
             return
         self.__content += "begin reaction rules\n"
         max_length = max(len(r.name) for r in self.model.rules) + 1  # +1 for the colon
@@ -93,12 +108,26 @@ class BngGenerator(object):
         for obs in self.model.observables:
             observable_code = format_reactionpattern(obs.reaction_pattern,
                                                      for_observable=True)
-            self.__content += ("  Molecules %-" + str(max_length) + "s   %s\n") % (obs.name, observable_code)
+            self.__content += ("  %s %-" + str(max_length) + "s   %s\n") % \
+                              (obs.match.title(), obs.name, observable_code)
         self.__content += "end observables\n\n"
+
+    def generate_functions(self):
+        exprs = self.model.expressions_dynamic()
+        if not exprs:
+            return
+        max_length = max(len(e.name) for e in exprs) + 2
+        self.__content += "begin functions\n"
+        for i, e in enumerate(exprs):
+            signature = e.name + '()'
+            self.__content += ("  %-" + str(max_length) + "s   %s\n") % \
+                (signature, sympy_to_muparser(e.expr))
+        self.__content += "end functions\n\n"
 
     def generate_species(self):
         if not self.model.initial_conditions:
-            raise Exception("BNG generator requires initial conditions.")
+            warn_caller("Model does not contain any initial conditions")
+            return
         species_codes = [format_complexpattern(cp) for cp, param in self.model.initial_conditions]
         max_length = max(len(code) for code in species_codes)
         self.__content += "begin species\n"
@@ -106,8 +135,6 @@ class BngGenerator(object):
             param = self.model.initial_conditions[i][1]
             self.__content += ("  %-" + str(max_length) + "s   %s\n") % (code, param.name)
         self.__content += "end species\n"
-
-
 
 def format_monomer_site(monomer, site):
     ret = site
@@ -171,3 +198,20 @@ def format_site_condition(site, state):
     else:
         raise Exception("BNG generator has encountered an unknown element in a rule pattern site condition.")
     return '%s%s' % (site, state_code)
+
+def warn_caller(message):
+    caller_frame = inspect.currentframe()
+    # walk up through the stack until we are outside of pysb
+    stacklevel = 1
+    module = inspect.getmodule(caller_frame)
+    while module and module.__name__.startswith('pysb.'):
+        stacklevel += 1
+        caller_frame = caller_frame.f_back
+        module = inspect.getmodule(caller_frame)
+    warnings.warn(message, stacklevel=stacklevel)
+
+def sympy_to_muparser(expr):
+    code = sympy.fcode(expr)
+    code = code.replace('\n     @', '')
+    code = code.replace('**', '^')
+    return code

@@ -7,6 +7,8 @@ import re
 import collections
 import weakref
 import copy
+import itertools
+import sympy
 
 
 def Initial(*args):
@@ -19,6 +21,12 @@ def MatchOnce(pattern):
     cp.match_once = True
     return cp
 
+
+# A module may define a global with this name (_pysb_doctest_...) to request
+# that SelfExporter not issue any ModelExistsWarnings from doctests defined
+# therein. (This is the best method we could come up with to manage this
+# behavior, as doctest doesn't offer per-doctest setup/teardown.)
+_SUPPRESS_MEW = '_pysb_doctest_suppress_modelexistswarning'
 
 class SelfExporter(object):
 
@@ -60,8 +68,14 @@ class SelfExporter(object):
             new_target_module = inspect.getmodule(caller_frame)
             if SelfExporter.default_model is not None \
                     and new_target_module is SelfExporter.target_module:
-                warnings.warn("Redefining model! (You can probably ignore this if you are running"
-                              " code interactively)", ModelExistsWarning, stacklevel)
+                # Warn, unless running a doctest whose containing module set the
+                # magic global which tells us to suppress it.
+                if not (
+                    caller_frame.f_code.co_filename.startswith('<doctest ') and
+                    caller_frame.f_globals.get(_SUPPRESS_MEW)):
+                    warnings.warn("Redefining model! (You can probably ignore "
+                                  "this if you are running code interactively)",
+                                  ModelExistsWarning, stacklevel)
                 SelfExporter.cleanup()
             SelfExporter.target_module = new_target_module
             SelfExporter.target_globals = caller_frame.f_globals
@@ -78,7 +92,7 @@ class SelfExporter(object):
                     module_name = SelfExporter.target_module.__name__
                 else:
                     # user is defining a model interactively (not really supported, but we'll try)
-                    module_name = '<interactive>'
+                    module_name = '_interactive_'
                 obj.name = module_name   # internal name for identification
                 export_name = 'model'    # symbol name for export
         elif isinstance(obj, Component):
@@ -150,6 +164,9 @@ class Component(object):
         # clear the weakref to parent model (restored in Model.__setstate__)
         state = self.__dict__.copy()
         del state['model']
+        # Force _export to False; we don't want the unpickling process to
+        # trigger SelfExporter.export!
+        state['_export'] = False
         return state
 
     def _do_export(self):
@@ -304,6 +321,15 @@ class MonomerWild(Monomer):
     def __repr__(self):
         return self.name
 
+    def __eq__(self, other):
+        return type(self)         == type(other)         and \
+               self.name          == other.name          and \
+               ( (self.sites is None and other.sites is None) or \
+                    sorted(self.sites) == sorted(other.sites)) and \
+               self.site_states   == other.site_states
+               
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
 
 class MonomerPattern(object):
@@ -420,6 +446,8 @@ class MonomerPattern(object):
             return ReactionPattern([ComplexPattern([self], None), ComplexPattern([other], None)])
         if isinstance(other, ComplexPattern):
             return ReactionPattern([ComplexPattern([self], None), other])
+        elif other == None:
+        	return self
         else:
             return NotImplemented
 
@@ -446,10 +474,16 @@ class MonomerPattern(object):
         else:
             return NotImplemented
 
+    def __eq__(self, other):
+        return type(self)           == type(other)           and \
+               self.monomer         == other.monomer         and \
+               self.site_conditions == other.site_conditions and \
+               self.compartment     == other.compartment
+
     def __repr__(self):
         value = '%s(' % self.monomer.name
         value += ', '.join([
-                k + '=' + str(self.site_conditions[k])
+                k + '=' + repr(self.site_conditions[k])
                 for k in self.monomer.sites
                 if self.site_conditions.has_key(k)
                 ])
@@ -523,8 +557,9 @@ class ComplexPattern(object):
         if not isinstance(other, ComplexPattern):
             raise Exception("Can only compare ComplexPattern to another ComplexPattern")
         return \
-            sorted((mp.monomer, mp.site_conditions) for mp in self.monomer_patterns) == \
-            sorted((mp.monomer, mp.site_conditions) for mp in other.monomer_patterns)
+            self.compartment == other.compartment and \
+            sorted((mp.monomer, mp.site_conditions, mp.compartment) for mp in self.monomer_patterns) == \
+            sorted((mp.monomer, mp.site_conditions, mp.compartment) for mp in other.monomer_patterns)
 
     def copy(self):
         """
@@ -535,11 +570,55 @@ class ComplexPattern(object):
         """
         return ComplexPattern([mp() for mp in self.monomer_patterns], self.compartment, self.match_once)
 
+    def __call__(self, **kwargs):
+        """Build a new ComplexPattern with updated site conditions."""
+
+        # Ensure we don't have more than one of any Monomer in our patterns.
+        mp_monomer = lambda mp: mp.monomer
+        patterns_sorted = sorted(self.monomer_patterns, key=mp_monomer)
+        pgroups = itertools.groupby(patterns_sorted, mp_monomer)
+        pcounts = [(monomer, sum(1 for mp in mps)) for monomer, mps in pgroups]
+        dup_monomers = [monomer.name for monomer, count in pcounts if count > 1]
+        if dup_monomers:
+            raise DuplicateMonomerError("ComplexPattern has duplicate "
+                                        "Monomers: " + str(dup_monomers))
+
+        # Ensure all specified sites are present in some Monomer.
+        self_site_groups = (mp.monomer.sites for mp in self.monomer_patterns)
+        self_sites = list(itertools.chain(*self_site_groups))
+        unknown_sites = set(kwargs).difference(self_sites)
+        if unknown_sites:
+            raise UnknownSiteError("Unknown sites in argument list: " +
+                                   ", ".join(unknown_sites))
+
+        # Ensure no specified site is present in multiple Monomers.
+        used_sites = [s for s in self_sites if s in kwargs]
+        sgroups = itertools.groupby(sorted(used_sites))
+        scounts = [(name, sum(1 for s in sites)) for name, sites in sgroups]
+        dup_sites = [name for name, count in scounts if count > 1]
+        if dup_sites:
+            raise DuplicateSiteError("ComplexPattern has duplicate sites: " +
+                                     str(dup_sites))
+
+        # Copy self so we can modify it in place before returning it.
+        cp = self.copy()
+        # Build map from site name to MonomerPattern.
+        site_map = {}
+        for mp in cp.monomer_patterns:
+            site_map.update(dict.fromkeys(mp.monomer.sites, mp))
+        # Apply kwargs to our ComplexPatterns.
+        for site, condition in kwargs.items():
+            site_map[site].site_conditions[site] = condition
+        return cp
+
+
     def __add__(self, other):
         if isinstance(other, ComplexPattern):
             return ReactionPattern([self, other])
         elif isinstance(other, MonomerPattern):
             return ReactionPattern([self, ComplexPattern([other], None)])
+        elif other == None:
+        	return self
         else:
             return NotImplemented
 
@@ -552,6 +631,12 @@ class ComplexPattern(object):
             elif self.match_once != other.match_once:
                 raise ValueError("merged ComplexPatterns must have the same value of match_once")
             return ComplexPattern(self.monomer_patterns + other.monomer_patterns, self.compartment, self.match_once)
+        else:
+            return NotImplemented
+
+    def __rmod__(self, other):
+        if isinstance(other, MonomerPattern):
+            return ComplexPattern([other] + self.monomer_patterns, self.compartment, self.match_once)
         else:
             return NotImplemented
 
@@ -609,6 +694,8 @@ class ReactionPattern(object):
             return ReactionPattern(self.complex_patterns + [ComplexPattern([other], None)])
         elif isinstance(other, ComplexPattern):
             return ReactionPattern(self.complex_patterns + [other])
+        elif other == None:
+        	return self
         else:
             return NotImplemented
 
@@ -704,7 +791,7 @@ def build_rule_expression(reactant, product, is_reversible):
     return RuleExpression(reactant, product, is_reversible)
 
 
-class Parameter(Component):
+class Parameter(Component, sympy.Symbol):
 
     """
     Model component representing a named constant floating point number.
@@ -716,6 +803,8 @@ class Parameter(Component):
     ----------
     value : number, optional
         The numerical value of the parameter. Defaults to 0.0 if not specified.
+        The provided value is converted to a float before being stored, so any
+        value that cannot be coerced to a float will trigger an exception.
 
     Attributes
     ----------
@@ -723,12 +812,37 @@ class Parameter(Component):
 
     """
 
+    def __new__(cls, name, value=0.0, _export=True):
+        return super(sympy.Symbol, cls).__new__(cls, name)
+
+    def __getnewargs__(self):
+        return (self.name, self.value, False)
+
     def __init__(self, name, value=0.0, _export=True):
         Component.__init__(self, name, _export)
-        self.value = value
+        self.value = float(value)
+
+    # This is needed to make sympy's evalf machinery treat this class like a
+    # Symbol.
+    @property
+    def func(self):
+        return sympy.Symbol
+
+    def __eq__(self, other):
+        return type(self) == type(other) and \
+               self.name  == other.name  and \
+               self.value == other.value
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __eq__(self, other):
+        return type(self) == type(other) and \
+               self.name  == other.name  and \
+               self.value == other.value
 
     def __repr__(self):
-        return  '%s(name=%s, value=%s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
+        return  '%s(%s, %s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
 
     def __eq__(self, other):
         return type(self) == type(other) and \
@@ -783,6 +897,15 @@ class Compartment(Component):
         self.dimension = dimension
         self.size = size
 
+    def __eq__(self, other):
+        return type(self)  == type(other)  and \
+               self.name   == other.name   and \
+               self.parent == other.parent and \
+               self.size   == other.size
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
     def __repr__(self):
         return  '%s(name=%s, parent=%s, dimension=%s, size=%s)' % \
             (self.__class__.__name__, repr(self.name), repr(self.parent), repr(self.dimension), repr(self.size))
@@ -822,9 +945,9 @@ class Rule(Component):
 
     Attributes
     ----------
-    Identical to Parameters (see above), except rule_expression is replaced by
-    its component elements reactant_pattern, product_pattern and is_reversible
-    which are documented in the RuleExpression class.
+
+    Identical to Parameters (see above), plus the component elements of
+    `rule_expression`: reactant_pattern, product_pattern and is_reversible.
 
     """
 
@@ -834,10 +957,10 @@ class Rule(Component):
         Component.__init__(self, name, _export)
         if not isinstance(rule_expression, RuleExpression):
             raise Exception("rule_expression is not a RuleExpression object")
-        if not isinstance(rate_forward, Parameter):
-            raise Exception("Forward rate must be a Parameter")
-        if rule_expression.is_reversible and not isinstance(rate_reverse, Parameter):
-            raise Exception("Reverse rate must be a Parameter")
+        validate_expr(rate_forward, "forward rate")
+        if rule_expression.is_reversible:
+            validate_expr(rate_reverse, "reverse rate")
+        self.rule_expression = rule_expression
         self.reactant_pattern = rule_expression.reactant_pattern
         self.product_pattern = rule_expression.product_pattern
         self.is_reversible = rule_expression.is_reversible
@@ -856,10 +979,11 @@ class Rule(Component):
         return len(self.product_pattern.complex_patterns) == 0
 
     def __repr__(self):
-        ret = '%s(name=%s, reactants=%s, products=%s, rate_forward=%s' % \
-            (self.__class__.__name__, repr(self.name), repr(self.reactant_pattern), repr(self.product_pattern), repr(self.rate_forward))
+        ret = '%s(%s, %s, %s' % \
+            (self.__class__.__name__, repr(self.name),
+             repr(self.rule_expression), self.rate_forward.name)
         if self.is_reversible:
-            ret += ', rate_reverse=%s' % repr(self.rate_reverse)
+            ret += ', %s' % self.rate_reverse.name
         if self.delete_molecules:
             ret += ', delete_molecules=True'
         if self.move_connected:
@@ -869,7 +993,25 @@ class Rule(Component):
 
 
 
-class Observable(Component):
+def validate_expr(obj, description):
+    """Raises an exception if the argument is not an expression."""
+    if not isinstance(obj, (Parameter, Expression)):
+        description_upperfirst = description[0].upper() + description[1:]
+        msg = "%s must be a Parameter or Expression" % description_upperfirst
+        raise ExpressionError(msg)
+
+def validate_const_expr(obj, description):
+    """Raises an exception if the argument is not a constant expression."""
+    validate_expr(obj, description)
+    if isinstance(obj, Expression) and not obj.is_constant_expression():
+        description_upperfirst = description[0].upper() + description[1:]
+        msg = ("%s must be a Parameter or constant Expression" %
+               description_upperfirst)
+        raise ConstantExpressionError(msg)
+
+
+
+class Observable(Component, sympy.Symbol):
 
     """
     Model component representing a linear combination of species.
@@ -884,10 +1026,15 @@ class Observable(Component):
     ----------
     reaction_pattern : ReactionPattern
         The list of ComplexPatterns to match.
+    match : 'species' or 'molecules'
+        Whether to match entire species ('species') or individual fragments
+        ('molecules'). Default is 'molecules'.
 
     Attributes
     ----------
     reaction_pattern : ReactionPattern
+        See Parameters.
+    match : 'species' or 'molecules'
         See Parameters.
     species : list of integers
         List of species indexes for species matching the pattern.
@@ -901,25 +1048,92 @@ class Observable(Component):
     solely so users could utilize the ComplexPattern '+' operator overload as
     syntactic sugar. There are no actual "reaction" semantics in this context.
 
-    Currently only BNG's 'Molecules' observables are supported, i.e. an
-    observable on "A()" will count dimers of A at two times the actual species
-    amount. 'Species' observables will be implemented in the future.
-
     """
 
-    def __init__(self, name, reaction_pattern, _export=True):
+    def __new__(cls, name, reaction_pattern, match='molecules', _export=True):
+        return super(sympy.Symbol, cls).__new__(cls, name)
+
+    def __getnewargs__(self):
+        return (self.name, self.reaction_pattern, self.match, False)
+
+    def __init__(self, name, reaction_pattern, match='molecules', _export=True):
         try:
             reaction_pattern = as_reaction_pattern(reaction_pattern)
         except InvalidReactionPatternException as e:
             raise type(e)("Observable pattern does not look like a ReactionPattern")
+        if match not in ('molecules', 'species'):
+            raise ValueError("Match must be 'molecules' or 'species'")
         Component.__init__(self, name, _export)
         self.reaction_pattern = reaction_pattern
+        self.match = match
         self.species = []
         self.coefficients = []
 
+    # This is needed to make sympy's evalf machinery treat this class like a
+    # Symbol.
+    @property
+    def func(self):
+        return sympy.Symbol
+
+    def __repr__(self):
+        ret = '%s(%s, %s' % (self.__class__.__name__, repr(self.name),
+                              repr(self.reaction_pattern))
+        if self.match != 'molecules':
+            ret += ', match=%s' % repr(self.match)
+        ret += ')'
+        return ret
+
+
+
+class Expression(Component, sympy.Symbol):
+
+    """
+    Model component representing a symbolic expression of other variables.
+
+    Parameters
+    ----------
+    expr : sympy.Expr
+        Symbolic expression.
+
+    Attributes
+    ----------
+    expr : sympy.Expr
+        See Parameters.
+
+    """
+
+    def __new__(cls, name, expr, _export=True):
+        return super(sympy.Symbol, cls).__new__(cls, name)
+
+    def __getnewargs__(self):
+        return (self.name, self.expr, False)
+
+    def __init__(self, name, expr, _export=True):
+        Component.__init__(self, name, _export)
+        self.expr = expr
+
+    def expand_expr(self):
+        """Return expr rewritten in terms of terminal symbols only."""
+        subs = ((a, a.expand_expr()) for a in self.expr.atoms()
+                if isinstance(a, Expression))
+        return self.expr.subs(subs)
+
+    def is_constant_expression(self):
+        """Return True if all terminal symbols are Parameters or numbers."""
+        return all(isinstance(a, Parameter) or
+                   (isinstance(a, Expression) and a.is_constant_expression()) or
+                   isinstance(a, sympy.Number)
+                   for a in self.expr.atoms())
+
+    # This is needed to make sympy's evalf machinery treat this class like a
+    # Symbol.
+    @property
+    def func(self):
+        return sympy.Symbol
+
     def __repr__(self):
         ret = '%s(%s, %s)' % (self.__class__.__name__, repr(self.name),
-                              repr(self.reaction_pattern))
+                              repr(self.expr))
         return ret
 
 
@@ -947,15 +1161,15 @@ class Model(object):
     monomers, compartments, parameters, rules, observables : ComponentSet
         The Component objects which make up the model.
     initial_conditions : list of tuple of (ComplexPattern, Parameter)
-        Specifies which species are present in the model's starting state (t=0)
-        and how much there is of each one. The ComplexPattern defines the
-        species identity, and it must be concrete (see
-        ComplexPattern.is_concrete). The Parameter defines the amount or
-        concentration of the species.
+        Specifies which species are present in the model's starting
+        state (t=0) and how much there is of each one.  The
+        ComplexPattern defines the species identity, and it must be
+        concrete (see ComplexPattern.is_concrete).  The
+        Parameter defines the amount or concentration of the species.
     species : list of ComplexPattern
         List of all complexes which can be produced by the model, starting from
-        the initial conditions and successively applying the rules. Each
-        ComplexPattern is concrete.
+        the initial conditions and successively applying
+        the rules. Each ComplexPattern is concrete.
     odes : list of sympy.Expr
         Mathematical expressions describing the time derivative of the amount of
         each species, as generated by the rules.
@@ -978,7 +1192,8 @@ class Model(object):
 
     """
 
-    _component_types = (Monomer, Compartment, Parameter, Rule, Observable)
+    _component_types = (Monomer, Compartment, Parameter, Rule, Observable,
+                        Expression)
 
     def __init__(self, name=None, base=None, _export=True):
         self.name = name
@@ -989,6 +1204,7 @@ class Model(object):
         self.parameters = ComponentSet()
         self.rules = ComponentSet()
         self.observables = ComponentSet()
+        self.expressions = ComponentSet()
         self.species = []
         self.odes = []
         self.reactions = []
@@ -1085,6 +1301,17 @@ class Model(object):
         cset_used = self.parameters_rules() | self.parameters_initial_conditions() | self.parameters_compartments()
         return self.parameters - cset_used
 
+    def expressions_constant(self):
+        """Return a ComponentSet of constant expressions."""
+        cset = ComponentSet(e for e in self.expressions
+                            if all(isinstance(a, (Parameter, sympy.Number))
+                                   for a in e.expand_expr().atoms()))
+        return cset
+
+    def expressions_dynamic(self):
+        """Return a ComponentSet of non-constant expressions."""
+        return self.expressions - self.expressions_constant()
+
     def add_component(self, other):
         """Add a component to the model."""
         # We have a container for each type of component. This code determines
@@ -1095,7 +1322,7 @@ class Model(object):
                 other.model = weakref.ref(self)
                 break
         else:
-            raise Exception("Tried to add component of unknown type '%s' to"
+            raise Exception("Tried to add component of unknown type '%s' to "
                             "model" % type(other))
 
     def add_annotation(self, annotation):
@@ -1130,6 +1357,7 @@ class Model(object):
         * Able to be cast as a ComplexPattern
         * Concrete (see ComplexPattern.is_concrete)
         * Distinct from any existing initial condition pattern
+        * match_once is False (nonsensical in this context)
 
         Parameters
         ----------
@@ -1144,15 +1372,16 @@ class Model(object):
         try:
             complex_pattern = as_complex_pattern(pattern)
         except InvalidComplexPatternException as e:
-            raise type(e)("Initial condition species does not look like a "
-                          "ComplexPattern")
+            raise InvalidInitialConditionError("Not a ComplexPattern")
         if not complex_pattern.is_concrete():
-            raise Exception("Pattern must be concrete")
+            raise InvalidInitialConditionError("Pattern not concrete")
         if any(complex_pattern.is_equivalent_to(other_cp)
                for other_cp, value in self.initial_conditions):
             # FIXME until we get proper canonicalization this could produce
             # false negatives
-            raise Exception("Duplicate initial condition")
+            raise InvalidInitialConditionError("Duplicate species")
+        if complex_pattern.match_once:
+            raise InvalidInitialConditionError("MatchOnce not allowed here")
         return complex_pattern
 
     def initial(self, pattern, value):
@@ -1171,8 +1400,7 @@ class Model(object):
 
         """
         complex_pattern = self._validate_initial_condition_pattern(pattern)
-        if not isinstance(value, Parameter):
-            raise Exception("Value must be a Parameter")
+        validate_const_expr(value, "initial condition value")
         self.initial_conditions.append( (complex_pattern, value) )
 
     def update_initial_condition_pattern(self, before_pattern, after_pattern):
@@ -1268,9 +1496,11 @@ class Model(object):
             obs.coefficients = []
 
     def __repr__(self):
-        return "<%s '%s' (monomers: %d, rules: %d, parameters: %d, compartments: %d) at 0x%x>" % \
-            (self.__class__.__name__, self.name, len(self.monomers), len(self.rules),
-             len(self.parameters), len(self.compartments), id(self))
+        return ("<%s '%s' (monomers: %d, rules: %d, parameters: %d, "
+                "expressions: %d, compartments: %d) at 0x%x>" %
+                (self.__class__.__name__, self.name,
+                 len(self.monomers), len(self.rules), len(self.parameters),
+                 len(self.expressions), len(self.compartments), id(self)))
 
 
 
@@ -1288,6 +1518,14 @@ class InvalidReversibleSynthesisDegradationRule(Exception):
         Exception.__init__(self, "Synthesis and degradation rules may not be"
                            "reversible.")
 
+class ExpressionError(ValueError):
+    """Expected an Expression but got something else."""
+    pass
+
+class ConstantExpressionError(ValueError):
+    """Expected a constant Expression but got something else."""
+    pass
+
 class ModelExistsWarning(UserWarning):
     """A second model was declared in a module that already contains one."""
     pass
@@ -1301,6 +1539,17 @@ class InvalidComponentNameError(ValueError):
     def __init__(self, name):
         ValueError.__init__(self, "Not a valid component name: '%s'" % name)
 
+class InvalidInitialConditionError(ValueError):
+    """Invalid initial condition pattern."""
+
+class DuplicateMonomerError(ValueError):
+    pass
+
+class DuplicateSiteError(ValueError):
+    pass
+
+class UnknownSiteError(ValueError):
+    pass
 
 
 class ComponentSet(collections.Set, collections.Mapping, collections.Sequence):
@@ -1393,7 +1642,7 @@ class ComponentSet(collections.Set, collections.Mapping, collections.Sequence):
         # We can implement this in O(1) ourselves, whereas the Sequence mixin
         # implements it in O(n).
         if not c in self:
-            raise ValueError
+            raise ValueError("%s is not in ComponentSet" % c)
         return self._index_map[c.name]
 
     def __and__(self, other):
@@ -1416,9 +1665,9 @@ class ComponentSet(collections.Set, collections.Mapping, collections.Sequence):
         return self.__xor__(other)
 
     def __repr__(self):
-        return '{' + \
-            ',\n '.join("'%s': %s" % t for t in self.iteritems()) + \
-            '}'
+        return 'ComponentSet([\n' + \
+            ''.join(' %s,\n' % repr(x) for x in self) + \
+            ' ])'
 
     def rename(self, c, new_name):
         """Change the name of component `c` to `new_name`."""
@@ -1445,9 +1694,43 @@ def extract_site_conditions(conditions=None, **kwargs):
     return site_conditions
 
 
+# Some light infrastructure for defining symbols that act like "keywords", i.e.
+# they are immutable singletons that stringify to their own name. Regular old
+# classes almost fit the bill, except that their __str__ method prepends the
+# complete module hierarchy to the base class name. The KeywordMeta class here
+# implements an alternate __str__ method which just returns the base name.
 
-ANY = MonomerAny()
-WILD = MonomerWild()
+class KeywordMeta(type):
+    def __str__(cls):
+        return cls.__name__
+
+class Keyword(object): __metaclass__ = KeywordMeta
+
+# The keywords.
+
+class ANY(Keyword):
+    """Site must have a bond, but identity of binding partner is irrelevant.
+
+    Use ANY in a MonomerPattern site_conditions dict to indicate that a site
+    must have a bond without specifying what the binding partner should be.
+
+    Equivalent to the "+" bond modifier in BNG."""
+    pass
+
+class WILD(Keyword):
+    """Site may be bound or unbound.
+
+    Use WILD as part of a (state, WILD) tuple in a MonomerPattern
+    site_conditions dict to indicate that a site must have the given state,
+    irrespective of the presence or absence of a bond. (Specifying only the
+    state implies there must not be a bond). A bare WILD in a site_conditions
+    dict is also permissible, but as this has the same meaning as the much
+    simpler option of leaving the given site out of the dict entirely, this
+    usage is deprecated.
+
+    Equivalent to the "?" bond modifier in BNG."""
+    pass
+
 
 warnings.simplefilter('always', ModelExistsWarning)
 warnings.simplefilter('always', SymbolExistsWarning)

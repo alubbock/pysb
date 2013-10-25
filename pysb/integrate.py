@@ -1,26 +1,24 @@
+import pysb.core
 import pysb.bng
 import numpy
 from scipy.integrate import ode
 from scipy.weave import inline
+import scipy.weave.build_tools
 import distutils.errors
 import sympy
 import re
 import itertools
-
-
-use_inline = False
-# try to inline a C statement to see if inline is functional
-try:
-    inline('int i;', force=1)
-    use_inline = True
-except (distutils.errors.CompileError, ImportError):
-    pass
 
 # some sane default options for a few well-known integrators
 default_integrator_options = {
     'vode': {
         'method': 'bdf',
         'with_jacobian': True,
+        # Set nsteps as high as possible to give our users flexibility in
+        # choosing their time step. (Let's be safe and assume vode was compiled
+        # with 32-bit ints. What would actually happen if it was and we passed
+        # 2**64-1 though?)
+        'nsteps': 2**31 - 1,
         },
     'cvode': {
         'method': 'bdf',
@@ -72,25 +70,46 @@ class Solver(object):
 
     """
 
+    @staticmethod
+    def _test_inline():
+        """Detect whether scipy.weave.inline is functional."""
+        if not hasattr(Solver, '_use_inline'):
+            Solver._use_inline = False
+            try:
+                inline('int i;', force=1)
+                Solver._use_inline = True
+            except (scipy.weave.build_tools.CompileError,
+                    distutils.errors.CompileError, ImportError):
+                pass
+
     def __init__(self, model, tspan, integrator='vode', **integrator_options):
 
         pysb.bng.generate_equations(model)
 
         code_eqs = '\n'.join(['ydot[%d] = %s;' % (i, sympy.ccode(model.odes[i])) for i in range(len(model.odes))])
         code_eqs = re.sub(r's(\d+)', lambda m: 'y[%s]' % (int(m.group(1))), code_eqs)
+        for e in model.expressions:
+            code_eqs = re.sub(r'\b(%s)\b' % e.name,
+                              sympy.ccode(e.expand_expr()), code_eqs)
         for i, p in enumerate(model.parameters):
             code_eqs = re.sub(r'\b(%s)\b' % p.name, 'p[%d]' % i, code_eqs)
 
+        Solver._test_inline()
         # If we can't use weave.inline to run the C code, compile it as Python code instead for use with
         # exec. Note: C code with array indexing, basic math operations, and pow() just happens to also
         # be valid Python.  If the equations ever have more complex things in them, this might fail.
-        if not use_inline:
+        if not Solver._use_inline:
             code_eqs_py = compile(code_eqs, '<%s odes>' % model.name, 'exec')
+        else:
+            for arr_name in ('ydot', 'y', 'p'):
+                macro = arr_name.upper() + '1'
+                code_eqs = re.sub(r'\b%s\[(\d+)\]' % arr_name,
+                                  '%s(\\1)' % macro, code_eqs)
 
         def rhs(t, y, p):
             ydot = self.ydot
             # note that the evaluated code sets ydot as a side effect
-            if use_inline:
+            if Solver._use_inline:
                 inline(code_eqs, ['ydot', 't', 'y', 'p']);
             else:
                 exec code_eqs_py in locals()
@@ -113,6 +132,12 @@ class Solver(object):
                                                       itertools.repeat(float)))
         else:
             self.yobs = numpy.ndarray((len(tspan), 0))
+        exprs = model.expressions_dynamic()
+        if len(exprs):
+            self.yexpr = numpy.ndarray(len(tspan), zip(exprs.keys(),
+                                                       itertools.repeat(float)))
+        else:
+            self.yexpr = numpy.ndarray((len(tspan), 0))
         self.yobs_view = self.yobs.view(float).reshape(len(self.yobs), -1)
         self.integrator = ode(rhs).set_integrator(integrator, **options)
 
@@ -147,6 +172,8 @@ class Solver(object):
             # create parameter vector from the values in the model
             param_values = numpy.array([p.value for p in self.model.parameters])
 
+        subs = dict((p, param_values[i])
+                    for i, p in enumerate(self.model.parameters))
         if y0 is not None:
             # accept vector of species amounts as an argument
             if len(y0) != self.y.shape[1]:
@@ -155,10 +182,18 @@ class Solver(object):
                 y0 = numpy.array(y0)
         else:
             y0 = numpy.zeros((self.y.shape[1],))
-            for cp, ic_param in self.model.initial_conditions:
-                pi = self.model.parameters.index(ic_param)
+            for cp, value_obj in self.model.initial_conditions:
+                if value_obj in self.model.parameters:
+                    pi = self.model.parameters.index(value_obj)
+                    value = param_values[pi]
+                elif value_obj in self.model.expressions:
+                    value = value_obj.expand_expr().evalf(subs=subs)
+                else:
+                    raise ValueError("Unexpected initial condition value type")
                 si = self.model.get_species_index(cp)
-                y0[si] = param_values[pi]
+                if si is None:
+                    raise Exception("Species not found in model: %s" % repr(cp))
+                y0[si] = value
 
         # perform the actual integration
         self.integrator.set_initial_value(y0, self.tspan[0])
@@ -174,6 +209,12 @@ class Solver(object):
         for i, obs in enumerate(self.model.observables):
             self.yobs_view[:, i] = \
                 (self.y[:, obs.species] * obs.coefficients).sum(1)
+        obs_names = self.model.observables.keys()
+        obs_dict = dict((k, self.yobs[k]) for k in obs_names)
+        for expr in self.model.expressions_dynamic():
+            expr_subs = expr.expand_expr().subs(subs)
+            func = sympy.lambdify(obs_names, expr_subs)
+            self.yexpr[expr.name] = func(**obs_dict)
 
 
 def odesolve(model, tspan, param_values=None, y0=None, integrator='vode',
@@ -252,7 +293,8 @@ def odesolve(model, tspan, param_values=None, y0=None, integrator='vode',
     >>> from pysb.examples.robertson import model
     >>> from numpy import linspace
     >>> numpy.set_printoptions(precision=4)
-    >>> yfull = odesolve(model, linspace(0, 40, 10))
+    >>> yfull = odesolve(model, linspace(0, 40, 10)) # doctest:+ELLIPSIS
+    #...
     >>> print yfull['A_total']   #doctest: +NORMALIZE_WHITESPACE
     [ 1.      0.899   0.8506  0.8179  0.793   0.7728  0.7557  0.7408  0.7277
     0.7158]

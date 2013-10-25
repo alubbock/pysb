@@ -18,7 +18,7 @@ def _get_bng_path():
     """
     Return the path to BioNetGen's BNG2.pl.
 
-    Looks for a BNG distribution at the path stored in the BNGHOME environment
+    Looks for a BNG distribution at the path stored in the BNGPATH environment
     variable if that's set, or else in a few hard-coded standard locations.
 
     """
@@ -29,7 +29,7 @@ def _get_bng_path():
     if _bng_path:
         return _bng_path
 
-    path_var = 'BNGHOME'
+    path_var = 'BNGPATH'
     dist_dirs = [
         '/usr/local/share/BioNetGen',
         'c:/Program Files/BioNetGen',
@@ -209,6 +209,10 @@ def generate_network(model, cleanup=True, append_stdout=False):
 
     """
     gen = BngGenerator(model)
+    if not model.initial_conditions:
+        raise NoInitialConditionsError()
+    if not model.rules:
+        raise NoRulesError()
     bng_filename = '%s_%d_%d_temp.bngl' % (model.name, os.getpid(), random.randint(0, 10000))
     net_filename = bng_filename.replace('.bngl', '.net')
     output = StringIO()
@@ -266,7 +270,7 @@ def generate_equations(model):
 
         while 'begin reactions' not in lines.next():
             pass
-        model.odes = [sympy.S(0)] * len(model.species)
+        model.odes = [sympy.numbers.Zero()] * len(model.species)
         reaction_cache = {}
         while True:
             line = lines.next()
@@ -279,7 +283,8 @@ def generate_equations(model):
             (rule_name, is_reverse) = re.match(r'#(\w+)(?:\((reverse)\))?', rule).groups()
             is_reverse = bool(is_reverse)
             r_names = ['s%d' % r for r in reactants]
-            combined_rate = sympy.Mul(*[sympy.S(t) for t in r_names + rate]) 
+            combined_rate = sympy.Mul(
+                *[sympy.Symbol(t) for t in r_names + rate])
             rule = model.rules[rule_name]
             reaction = {
                 'reactants': reactants,
@@ -383,3 +388,14 @@ def _parse_group(model, line):
             obs.coefficients.append(int(terms[0]))
             # -1 to change to 0-based indexing
             obs.species.append(int(terms[1]) - 1)
+
+
+class NoInitialConditionsError(RuntimeError):
+    """Model initial_conditions is empty."""
+    def __init__(self):
+        RuntimeError.__init__(self, "Model has no initial conditions")
+
+class NoRulesError(RuntimeError):
+    """Model rules is empty."""
+    def __init__(self):
+        RuntimeError.__init__(self, "Model has no rules")
