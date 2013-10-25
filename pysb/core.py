@@ -267,13 +267,59 @@ class Monomer(Component):
         return MonomerPattern(self, extract_site_conditions(conditions, **kwargs), None)
 
     def __repr__(self):
-        value = '%s(%s' % (self.__class__.__name__, repr(self.name))
-        if self.sites:
-            value += ', %s' % repr(self.sites)
-        if self.site_states:
-            value += ', %s' % repr(self.site_states)
-        value += ')'
-        return value
+        return  '%s(name=%s, sites=%s, site_states=%s)' % \
+            (self.__class__.__name__, repr(self.name), repr(self.sites), repr(self.site_states))
+
+    def __eq__(self, other):
+        return type(self)         == type(other)         and \
+               self.name          == other.name          and \
+               ((self.sites is None and other.sites is None) or \
+               (sorted(self.sites) == sorted(other.sites))) and \
+               self.site_states   == other.site_states
+
+class MonomerAny(Monomer):
+
+    """
+    A wildcard monomer which matches any species.
+
+    This is only needed where you would use a '+' in BNG. Do not construct any
+    instances -- use the singleton ``ANY`` instead.
+
+    """
+
+    def __init__(self):
+        # don't call Monomer.__init__ since this doesn't want
+        # Component stuff and has no user-accessible API
+        self.name = 'ANY'
+        self.sites = None
+        self.site_states = {}
+        self.compartment = None
+
+    def __repr__(self):
+        return self.name
+
+
+
+class MonomerWild(Monomer):
+
+    """
+    A wildcard monomer which matches any species, or nothing (no bond).
+
+    This is only needed where you would use a '?' in BNG. Do not construct any
+    instances -- use the singleton ``WILD`` instead.
+
+    """
+
+    def __init__(self):
+        # don't call Monomer.__init__ since this doesn't want
+        # Component stuff and has no user-accessible API
+        self.name = 'WILD'
+        self.sites = None
+        self.site_states = {}
+        self.compartment = None
+
+    def __repr__(self):
+        return self.name
 
     def __eq__(self, other):
         return type(self)         == type(other)         and \
@@ -446,6 +492,11 @@ class MonomerPattern(object):
             value += ' ** ' + self.compartment.name
         return value
 
+    def __eq__(self, other):
+        return type(self)           == type(other)           and \
+               self.monomer         == other.monomer         and \
+               self.site_conditions == other.site_conditions and \
+               self.compartment     == other.compartment
 
 
 class ComplexPattern(object):
@@ -793,6 +844,10 @@ class Parameter(Component, sympy.Symbol):
     def __repr__(self):
         return  '%s(%s, %s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
 
+    def __eq__(self, other):
+        return type(self) == type(other) and \
+               self.name  == other.name  and \
+               self.value == other.value
 
 
 class Compartment(Component):
@@ -855,6 +910,11 @@ class Compartment(Component):
         return  '%s(name=%s, parent=%s, dimension=%s, size=%s)' % \
             (self.__class__.__name__, repr(self.name), repr(self.parent), repr(self.dimension), repr(self.size))
 
+    def __eq__(self, other):
+        return type(self)  == type(other)  and \
+               self.name   == other.name   and \
+               self.parent == other.parent and \
+               self.size   == other.size
 
 
 class Rule(Component):
