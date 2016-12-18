@@ -76,14 +76,14 @@ class TestSuite(object):
     We could also have used SpeciesOnlyReactant. The difference is the
     latter checks for an appearance as a reactant, whereas
     SpeciesNeverProduct would pass whether the species appeared as a
-    reactant or if it was absent from all reactions.
+    reactant or not.
 
     >>> ts.add(SpeciesOnlyReactant(L(b=None)))
 
-    CPARP is an output in this model, so it should appear as a reactant but
-    never as a product:
+    CPARP is an output in this model, so it should appear as a product but
+    never as a reactant:
 
-    >>> ts.add(SpeciesOnlyReactant(CPARP()))
+    >>> ts.add(SpeciesOnlyProduct(CPARP()))
 
     When we're ready, we can generate the reactions and check the assertions:
 
@@ -94,7 +94,7 @@ class TestSuite(object):
       [AMito(b=1) % mSmac(b=1)]...
     SpeciesExists(AMito(b=1) % mCytoC(b=1))...OK...
     SpeciesNeverProduct(L(b=None))...OK...
-    SpeciesOnlyReactant(CPARP())...OK...
+    SpeciesOnlyProduct(CPARP())...OK...
 
     We can also execute any test immediately without adding it to the test
     suite (note that some tests require a reaction network to be generated):
@@ -329,16 +329,16 @@ class SpeciesOnlyProduct(ReactionAssertion):
     """ Checks a species appears as a product but never as a reactant """
     def check(self, model, **kwargs):
         rpm = kwargs['reaction_pattern_matcher']
-        if not rpm.match_reactants(self.pattern):
+        if not rpm.match_products(self.pattern):
             raise ModelAssertionFailure(assertion=self,
                                         model=model,
-                                        message='Does not appear as reactant')
-        as_product = rpm.match_procuts(self.pattern)
-        if as_product:
+                                        message='Does not appear as product')
+        as_reactant = rpm.match_reactants(self.pattern)
+        if as_reactant:
             raise ModelAssertionFailure(assertion=self,
                                         model=model,
-                                        message='Appears as product:' +
-                                                str(as_product))
+                                        message='Appears as reactant:' +
+                                                str(as_reactant))
 
         return True
 
@@ -348,15 +348,15 @@ class SpeciesOnlyReactant(ReactionAssertion):
 
     def check(self, model, **kwargs):
         rpm = kwargs['reaction_pattern_matcher']
-        if not rpm.match_products(self.pattern):
+        if not rpm.match_reactants(self.pattern):
             raise ModelAssertionFailure(assertion=self,
                                         model=model,
-                                        message='Does not appear as product')
-        as_reactant = rpm.match_reactants(self.pattern)
-        if as_reactant:
+                                        message='Does not appear as reactant')
+        as_product = rpm.match_products(self.pattern)
+        if as_product:
             raise ModelAssertionFailure(assertion=self,
                                         model=model,
                                         message='Appears as product:' +
-                                                str(as_reactant))
+                                                str(as_product))
 
         return True
