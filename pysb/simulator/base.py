@@ -343,13 +343,7 @@ class Simulator(object):
                                  "model.parameters")
             self._params = new_params
 
-    @abstractmethod
-    def run(self, tspan=None, initials=None, param_values=None):
-        """Run a simulation.
-
-        Implementations should return a :class:`.SimulationResult` object.
-        """
-        self._logger.info('Simulation(s) started')
+    def _setup_run(self, tspan=None, initials=None, param_values=None):
         if tspan is not None:
             self.tspan = tspan
         if self.tspan is None:
@@ -394,7 +388,116 @@ class Simulator(object):
             # Network-free simulators don't have species, but we will want to
             # allow users to supply initials. Right now, that will raise an
             # exception. Need to think about this. --LAH
-        return None
+
+    @abstractmethod
+    def run(self, tspan=None, initials=None, param_values=None):
+        """Run a simulation.
+
+        Implementations should return a :class:`.SimulationResult` object.
+        """
+        self._logger.info('Simulation(s) started')
+        self._setup_run(tspan=tspan, initials=initials,
+                        param_values=param_values)
+
+    def run_with_perturbations(self, perturbations, **kwargs):
+        perturbation_times = sorted(perturbations.keys())
+
+        # First, set up tspan, param_values and initials
+        self._setup_run(kwargs.pop('tspan', None),
+                        kwargs.pop('initials', None),
+                        kwargs.pop('param_values', None))
+
+        actual_tspan = self.tspan
+        actual_initials = self.initials
+        actual_param_values = self.param_values
+
+        if not np.allclose(sorted(self.tspan), self.tspan, atol=1e-16):
+            raise ValueError('This function requires tspan to be in '
+                             'ascending order')
+
+        for t in perturbation_times:
+            if t < self.tspan[0] or t > self.tspan[-1]:
+                raise ValueError('Perturbation time %f is not in the range '
+                                 'specified by tspan %s' % (t,
+                                                            str(self.tspan)))
+            if not any(np.isclose(t, self.tspan)):
+                raise ValueError(
+                    'Perturbation time %f is not defined in tspan'
+                    % t)
+
+        # Create the tspans for each simulation stage
+        tspans = np.split(self.tspan,
+                          np.searchsorted(self.tspan, perturbation_times))
+        for i in range(len(tspans) - 1):
+            tspans[i] = np.append(tspans[i], tspans[i + 1][0])
+
+        self._logger.info('Splitting simulation into %d chunks' % len(tspans))
+
+        # Do an initial simulation with the above setup until the point
+        # at which
+        # we want to change a parameter (perturbation_time)
+        self.tspan = tspans[0]
+        res = self.run(**kwargs)
+
+        df_out = res.dataframe
+
+        for i, t in enumerate(perturbation_times, 1):
+            self._logger.info('Running simulation chunk %d' % (i + 1))
+            self._logger.debug('tspan for this chunk: ' + str(tspans[i]))
+
+            # Set initials as at final timepoint of previous simulation
+            if res.nsims > 1:
+                new_initials = [res.species[n][-1] for n in range(res.nsims)]
+            else:
+                new_initials = res.species[-1]
+
+            # Update initials and param_values with perturbations
+            param_updates = {}
+            for k, v in perturbations[t].items():
+                if isinstance(k, (MonomerPattern, ComplexPattern)):
+                    sp_ind = self.model.get_species_index(
+                        as_complex_pattern(k))
+                    if sp_ind is None:
+                        raise ValueError('ComplexPattern %s was not found in '
+                                         'the species list' % str(k))
+                    if res.nsims == 1:
+                        new_initials[sp_ind] = v
+                    else:
+                        for n in range(res.nsims):
+                            new_initials[n][sp_ind] = v
+                else:
+                    param_updates[k] = v
+            self._logger.debug(new_initials)
+            self.initials = new_initials
+            if param_updates:
+                self.param_values = param_updates
+
+            # Run simulation and get results
+            self.tspan = tspans[i]
+            res = self.run(**kwargs)
+
+            if res.nsims == 1:
+                df_out = pd.concat([df_out.iloc[:-1], res.dataframe])
+            else:
+                df_out.drop(df_out.index[
+                                np.arange(start=len(df_out.index) /
+                                                      res.nsims - 1,
+                                            stop=len(df_out.index),
+                                            step=len(df_out.index) / res.nsims
+                                            )],
+                            inplace=True)
+                df_out = pd.concat([df_out, res.dataframe])
+                df_out.sortlevel(inplace=True)
+
+        self._logger.info('All simulation chunks complete')
+
+        # Reset tspan, initials and param_values to their original settings
+        # with perturbations removed
+        self.tspan = actual_tspan
+        self.initials = actual_initials
+        self.param_values = actual_param_values
+
+        return df_out
 
 
 class SimulationResult(object):

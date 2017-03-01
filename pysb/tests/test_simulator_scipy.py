@@ -272,6 +272,45 @@ def test_earm_integration():
         ScipyOdeSimulator._use_inline = True
 
 
+def test_simulation_with_perturbations():
+    # Total model simulation time
+    tspan = np.linspace(0, 120, 13)
+
+    # Define model
+    Model()
+    Monomer('A')
+    Monomer('B')
+
+    Initial(A(), Parameter('A_0', 0))
+
+    Parameter('A_synth', 0)
+    Parameter('B_synth', 5)
+
+    Rule('synth_A', None >> A(), A_synth)
+    Rule('synth_B', None >> B(), B_synth)
+
+    Observable('A_obs', A())
+    Observable('B_obs', B())
+    # End define model
+
+    # Define perturbations by their time points
+    perturbations = {
+        30: {'A_synth': 10},
+        60: {'A_synth': 0},
+        90: {'A_synth': 10},
+        110: {B(): 0}
+    }
+    # End define perturbations
+
+    sim = ScipyOdeSimulator(model, tspan=tspan)
+
+    df = sim.run_with_perturbations(perturbations=perturbations,
+                                    initials=[[0, 1, 0],
+                                              [10, 10, 10]])
+
+    assert len(df.index) == len(tspan) * 2
+
+
 @raises(SimulatorException)
 def test_simulation_no_tspan():
     ScipyOdeSimulator(robertson.model).run()
