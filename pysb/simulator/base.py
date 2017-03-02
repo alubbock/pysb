@@ -441,6 +441,10 @@ class Simulator(object):
 
         df_out = res.dataframe
 
+        # Need to update parameters defined in earlier simulations, since
+        # they need to persist across future chunks
+        param_updates = {}
+
         for i, t in enumerate(perturbation_times, 1):
             self._logger.info('Running simulation chunk %d' % (i + 1))
             self._logger.debug('tspan for this chunk: ' + str(tspans[i]))
@@ -452,7 +456,6 @@ class Simulator(object):
                 new_initials = res.species[-1]
 
             # Update initials and param_values with perturbations
-            param_updates = {}
             for k, v in perturbations[t].items():
                 if isinstance(k, (MonomerPattern, ComplexPattern)):
                     sp_ind = self.model.get_species_index(
