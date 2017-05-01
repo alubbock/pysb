@@ -483,10 +483,10 @@ class Simulator(object):
                 df_out = pd.concat([df_out.iloc[:-1], res.dataframe])
             else:
                 df_out.drop(df_out.index[
-                                np.arange(start=len(df_out.index) /
+                                np.arange(start=len(df_out.index) //
                                                       res.nsims - 1,
                                             stop=len(df_out.index),
-                                            step=len(df_out.index) / res.nsims
+                                            step=len(df_out.index) // res.nsims
                                             )],
                             inplace=True)
                 df_out = pd.concat([df_out, res.dataframe])
