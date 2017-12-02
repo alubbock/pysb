@@ -6,6 +6,7 @@ _path_config = {
     'bng': {
         'name': 'BioNetGen',
         'executable': 'BNG2.pl',
+        'batch_file': 'BNG2.bat',
         'env_var': 'BNGPATH',
         'search_paths': {
             'posix': ('/usr/local/share/BioNetGen', ),
@@ -204,6 +205,13 @@ def _get_anaconda_bindir():
         return bindir
 
 
+def _get_batch_file(prog_name):
+    try:
+        return _path_config[prog_name]['batch_file']
+    except KeyError:
+        return None
+
+
 def _get_executable(prog_name):
     executable = _path_config[prog_name]['executable']
     if isinstance(executable, str):
@@ -225,6 +233,16 @@ def _validate_path(prog_name, full_path):
                          full_path)
 
     if not os.path.isfile(full_path):
+        # On anaconda, check batch file, if applicable
+        if _is_anaconda():
+            batch_file = _get_batch_file(prog_name)
+            if batch_file:
+            try:
+                return _validate_path(prog_name,
+                                      os.path.join(full_path, batch_file))
+            except ValueError:
+                pass
+
         # It's a directory, try appending the executable name
         return _validate_path(prog_name, os.path.join(full_path,
                                                       _get_executable(
