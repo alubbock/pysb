@@ -1,4 +1,6 @@
 import os
+import sys
+import sysconfig
 
 _path_config = {
     'bng': {
@@ -121,6 +123,15 @@ def get_path(prog_name):
                                 path_conf['name'],
                                 _get_executable(prog_name)))
 
+    # If this is anaconda, check the anaconda binary dir
+    if _is_anaconda():
+        try:
+            _path_cache[prog_name] = _validate_path(prog_name,
+                                                    _get_anaconda_bindir())
+            return _path_cache[prog_name]
+        except ValueError:
+            pass
+
     # Check default paths for this operating system
     if os.name not in path_conf['search_paths'].keys():
         raise Exception('No default path is known for %s on your '
@@ -170,6 +181,27 @@ def set_path(prog_name, full_path):
         raise ValueError('%s is not a known external executable' % prog_name)
 
     _path_cache[prog_name] = _validate_path(prog_name, full_path)
+
+
+def _is_anaconda():
+    """ Identify if this is an anaconda environment """
+    return 'conda' in sys.version
+
+
+def _get_anaconda_bindir():
+    """ Get the binary path from python build time (for anaconda) """
+    # Is this an anaconda virtual environment?
+    conda_env = os.environ.get('CONDA_PREFIX', None)
+    if conda_env:
+        return os.path.join(conda_env, 'Scripts' if os.name == 'nt' else 'bin')
+
+    # Otherwise, use the default anaconda bin directory
+    bindir = sysconfig.get_config_var('BINDIR')
+    if os.name == 'nt':
+        # bindir doesn't point to scripts directory on Windows
+        return os.path.join(bindir, 'Scripts')
+    else:
+        return bindir
 
 
 def _get_executable(prog_name):
