@@ -233,10 +233,9 @@ def _validate_path(prog_name, full_path):
                          full_path)
 
     if not os.path.isfile(full_path):
-        # On anaconda, check batch file, if applicable
-        if _is_anaconda():
-            batch_file = _get_batch_file(prog_name)
-            if batch_file:
+        # On anaconda, check batch file on Windows, if applicable
+        batch_file = _get_batch_file(prog_name)
+        if _is_anaconda() and os.name == 'nt' and batch_file:
             try:
                 return _validate_path(prog_name,
                                       os.path.join(full_path, batch_file))
