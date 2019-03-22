@@ -59,7 +59,7 @@ class CupSodaSimulator(Simulator):
     **kwargs: dict, optional
         Extra keyword arguments, including:
 
-        * ``gpu``: Index of GPU to run on (default: 0)
+        * ``gpu``: Index of GPU(s) to run on (default: 0)
         * ``vol``: System volume; required if model encoded in extrinsic 
           (number) units (default: None)
         * ``obs_species_only``: Only output species contained in observables
@@ -104,7 +104,8 @@ class CupSodaSimulator(Simulator):
         following:
 
         * vol (float or None): System volume
-        * n_blocks (int or None): Number of GPU blocks used by the simulator
+        * n_blocks (int, list or None): Number of GPU blocks used by the
+        simulator. Use a list to specify per-GPU, or int for all GPUs.
         * atol (float): Absolute integrator tolerance
         * rtol (float): Relative integrator tolerance
         * chunksize (int or None): The maximum number of simulations to run
@@ -242,7 +243,7 @@ class CupSodaSimulator(Simulator):
         bin_path = get_path('cupsoda')
 
         # Start simulations
-        for gpu in gpus:
+        for gpu, n_blocks in zip(gpus, self.n_blocks):
             _indirs[gpu] = os.path.join(outdir, "INPUT_GPU{}_{}".format(
                 gpu, chunk_idx))
             os.mkdir(_indirs[gpu])
@@ -255,7 +256,7 @@ class CupSodaSimulator(Simulator):
             # Build command
             # ./cupSODA input_model_folder blocks output_folder simulation_
             # file_prefix gpu_number fitness_calculation memory_use dump
-            command = [bin_path, _indirs[gpu], str(self.n_blocks),
+            command = [bin_path, _indirs[gpu], str(n_blocks),
                        _outdirs[gpu], self._prefix, str(gpu),
                        '0', self._memory_usage, str(self._cupsoda_verbose)]
 
@@ -411,33 +412,40 @@ class CupSodaSimulator(Simulator):
             bytes_per_float = 4
             memory_per_thread = (self._len_species + 1) * bytes_per_float
             if cuda is None:
-                threads_per_block = default_threads_per_block
+                threads_per_block = [default_threads_per_block] * len(self.gpu)
             else:
                 cuda.init()
-                device = cuda.Device(self.gpu[0])
-                attrs = device.get_attributes()
-                shared_memory_per_block = attrs[
-                    cuda.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK]
-                upper_limit_threads_per_block = attrs[
-                    cuda.device_attribute.MAX_THREADS_PER_BLOCK]
-                max_threads_per_block = min(
-                    shared_memory_per_block / memory_per_thread,
-                    upper_limit_threads_per_block)
-                threads_per_block = min(max_threads_per_block,
-                                        default_threads_per_block)
-            n_blocks = int(
-                np.ceil(1. * len(self.param_values) / threads_per_block))
-            self._logger.debug('n_blocks set to {} (used pycuda: {})'.format(
-                n_blocks, cuda is not None
-            ))
+                threads_per_block = []
+                for gpu in self.gpu:
+                    device = cuda.Device(gpu)
+                    attrs = device.get_attributes()
+                    shared_memory_per_block = attrs[
+                        cuda.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK]
+                    upper_limit_threads_per_block = attrs[
+                        cuda.device_attribute.MAX_THREADS_PER_BLOCK]
+                    max_threads_per_block = min(
+                        shared_memory_per_block / memory_per_thread,
+                        upper_limit_threads_per_block)
+                    threads_per_block.append(min(max_threads_per_block,
+                                             default_threads_per_block))
+            n_blocks = []
+            for gpu in self.gpu:
+                n_blocks.append(int(
+                    np.ceil(1. * len(self.param_values) / threads_per_block)))
+                self._logger.debug('GPU{} n_blocks set to {} (used pycuda: {})'
+                                   .format(n_blocks, gpu, cuda is not None)
+                )
         self.n_blocks = n_blocks
         return n_blocks
 
     @n_blocks.setter
     def n_blocks(self, n_blocks):
-        if not isinstance(n_blocks, int):
-            raise ValueError("n_blocks must be an integer")
-        if n_blocks <= 0:
+        if isinstance(n_blocks, int):
+            n_blocks = [n_blocks] * len(self.gpu)
+        elif not isinstance(n_blocks, collections.Iterable) \
+                or not all(isinstance(b, int) for b in n_blocks):
+            raise ValueError("n_blocks must be an integer or list of integers")
+        if any(b <= 0 for b in n_blocks):
             raise ValueError("n_blocks must be greater than 0")
         self.opts['n_blocks'] = n_blocks
 
