@@ -7,7 +7,7 @@ from matplotlib.pyplot import *
 from numpy import linspace, array
 from pysb.simulator import ScipyOdeSimulator
 
-from robertson import model
+from .robertson import model
 
 # We will integrate from t=0 to t=40
 t = linspace(0, 40)

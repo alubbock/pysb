@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from pysb.simulator.bng import BngSimulator
-from kinase_cascade import model
+from .kinase_cascade import model
 
 # We will integrate from t=0 to t=40
 t = np.linspace(0, 40, 50)

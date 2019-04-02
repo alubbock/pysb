@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from numpy import linspace
 from pysb.simulator import ScipyOdeSimulator
 
-from bax_pore import model
+from .bax_pore import model
 
 
 t = linspace(0, 100)

@@ -2,7 +2,7 @@ from __future__ import print_function
 from pysb.simulator import ScipyOdeSimulator
 from matplotlib.pyplot import plot, legend, show
 from matplotlib.pylab import linspace
-from kinase_cascade import model
+from .kinase_cascade import model
 
 
 tspan = linspace(0, 1200)

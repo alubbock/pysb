@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from pysb.simulator import StochKitSimulator
-from tyson_oscillator import model
+from pysb.examples.tyson_oscillator import model
 
 
 def plot_mean_min_max(name, title=None):

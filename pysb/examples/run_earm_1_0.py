@@ -6,7 +6,7 @@ from pysb.simulator import ScipyOdeSimulator
 import matplotlib.pyplot as plt
 from numpy import *
 
-from earm_1_0 import model
+from .earm_1_0 import model
 
 
 # saturating level of ligand (corresponding to ~1000 ng/ml SuperKiller TRAIL)

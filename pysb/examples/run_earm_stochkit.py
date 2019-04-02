@@ -5,8 +5,9 @@ stochastic simulation algorithm (SSA) implementation.
 import matplotlib.pyplot as plt
 import numpy as np
 
-from earm_1_0 import model
+from pysb.examples.earm_1_0 import model
 from pysb.simulator import StochKitSimulator
+import os
 
 
 def plot_mean_min_max(name, title=None):
@@ -22,9 +23,16 @@ def plot_mean_min_max(name, title=None):
     plt.xlabel('Time')
     plt.ylabel('Population of %s' % name)
 
+
+num_runs = 20
+
+# Only run twice for PySB's tests, for speed. PySB users can ignore this.
+if os.environ.get('PYSB_TESTS', None):
+    num_runs = 2
+
 tspan = np.linspace(0, 20000, 1000)
 sim = StochKitSimulator(model, tspan)
-simres = sim.run(n_runs=20, seed=None, algorithm="ssa")
+simres = sim.run(n_runs=num_runs, seed=None, algorithm="ssa")
 
 trajectories = simres.all
 tout = simres.tout

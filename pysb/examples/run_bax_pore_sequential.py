@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from numpy import logspace
 from pysb.simulator import ScipyOdeSimulator
 
-from bax_pore_sequential import model, max_size
+from .bax_pore_sequential import model, max_size
 
 
 # System is very stiff, and using logspace instead of linspace to produce the
