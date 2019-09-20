@@ -174,7 +174,9 @@ class Component(object):
     _VARIABLE_NAME_REGEX = re.compile(r'[_a-z][_a-z0-9]*\Z', re.IGNORECASE)
 
     def __init__(self, name, _export=True):
-        if not self._VARIABLE_NAME_REGEX.match(name):
+        if name is None and _export:
+            raise ValueError('Component name must be set to use SelfExporter')
+        if name is not None and not self._VARIABLE_NAME_REGEX.match(name):
             raise InvalidComponentNameError(name)
         self.name = name
         self.model = None  # to be set in Model.add_component
@@ -535,7 +537,7 @@ class MonomerPattern(object):
         # 1.
         sites_ok = self.is_site_concrete()
         # 2.
-        compartment_ok = not self.monomer.model().compartments or self.compartment
+        compartment_ok = self.monomer.model is None or not self.monomer.model().compartments or self.compartment
         return compartment_ok and sites_ok
 
     def is_site_concrete(self):
@@ -1798,8 +1800,8 @@ class Model(object):
 
     """
 
-    _component_types = (Monomer, Compartment, Parameter, Rule, Observable,
-                        Expression, Tag)
+    _component_types = (Monomer, Compartment, Parameter, Tag, Expression, Rule,
+                        Observable)
 
     def __init__(self, name=None, base=None, _export=True):
         self.name = name

@@ -13,7 +13,7 @@ class Annotation(object):
     Parameters
     ----------
     subject
-        Element to annotate, typically a Component.
+        Element to annotate, typically a Component.}
     object_
         Annotation, typically a string containing an identifiers.org URL.
     predicate : string, optional
@@ -22,12 +22,12 @@ class Annotation(object):
 
     """
 
-    def __init__(self, subject, object_, predicate="is"):
+    def __init__(self, subject, object_, predicate="is", _export=True):
         self.subject = subject
         self.object = object_
         self.predicate = predicate
         # if SelfExporter is in use, add the annotation to the model
-        if SelfExporter.do_export:
+        if _export:
             SelfExporter.default_model.add_annotation(self)
 
     def __repr__(self):
