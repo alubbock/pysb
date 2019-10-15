@@ -10,11 +10,13 @@ from pysb.core import Model as OldModel, \
     Initial as OldInitial, \
     Expression as OldExpression, \
     Observable as OldObservable, \
+    Tag as OldTag, \
     MultiState, \
     extract_site_conditions
 from pysb.annotation import Annotation
 import collections
 import re
+import networkx as nx
 
 
 def _remove_name(s):
@@ -107,11 +109,36 @@ class Initial(OldInitial):
         super(Initial, self).__init__(*args, **kwargs, _export=False)
 
 
+def _yield_elements_by_type(components, component_type):
+    for c in components:
+        if isinstance(c, component_type):
+            yield c
+
+
+def sort_components(components):
+    g = nx.DiGraph()
+    g.add_nodes_from(components)
+    for c in components:
+        for d in c.component_dependencies():
+            g.add_edge(d, c)
+
+    from networkx.algorithms.dag import topological_sort
+    return topological_sort(g)
+
+
 class ModelDict(collections.OrderedDict):
     def __setitem__(self, key, value):
         if isinstance(value, Component):
             # print(f'Setting {value}.name to {key}')
             value.name = key
+        elif key == 'macros':
+            for macro in value:
+                if not callable(macro[0]):
+                    raise ValueError('Macro not callable')
+                for component in macro[0](*macro[1:]):
+                    super(ModelDict, self).__setitem__(component.name,
+                                                       component)
+
         super(ModelDict, self).__setitem__(key, value)
 
 
@@ -124,12 +151,12 @@ class ModelMeta(type):
 class Model(OldModel, metaclass=ModelMeta):
     initials = []
     annotations = []
+    macros = []
 
     @staticmethod
     def _convert_components_old_to_new(obj_dict):
         obj_mapping = {}
         new_obj_dict = {}
-        print(obj_dict.keys())
         for c_name, c_orig in obj_dict.items():
             if isinstance(c_orig, OldMonomer):
                 c = Monomer(copy.copy(c_orig.sites),
@@ -179,15 +206,37 @@ class Model(OldModel, metaclass=ModelMeta):
     def __init__(self, *args, **kwargs):
         super(Model, self).__init__(*args, **kwargs, _export=False)
 
+        obj_props = {k: getattr(self, k) for k in dir(self)}
+        # Filter to components
+        c_dict = {c: name for name, c in obj_props.items()
+                  if isinstance(c, Component)}
+        # Get sort order
+        c_sorted = sort_components(c_dict.keys())
+
+        # print(self.equilibrate_A_to_B.component_dependencies())
+
+        # Get obj_dict
+
+        for k, v in c_dict.items():
+            print(k, v)
+        #print(c_sorted)
+        obj_dict = collections.OrderedDict(
+            (c_dict[c], c) for c in c_sorted
+        )
+
         # Use __dict__ instead of dir() to preserve addition order
-        obj_dict = {k: v for k, v in self.__class__.__dict__.items()
-                    if isinstance(v, Component)}
+        # obj_dict = collections.OrderedDict(
+        #     (k, getattr(self, k)) for k in self.__class__.__dict__.()
+        #     if isinstance(v, Component)
+        # )
 
         name_mapping, obj_mapping = self._convert_components_old_to_new(obj_dict)
         for c_name, c_new in name_mapping.items():
             c_new.name = c_name
             c_new.model = self
             self.add_component(c_new)
+
+        print(obj_mapping)
 
         # Initials
         for i in self._copy_initials(self.__class__.initials, obj_mapping):
@@ -233,7 +282,6 @@ class Model(OldModel, metaclass=ModelMeta):
 
     @classmethod
     def from_oldstyle(cls, model):
-        # TODO: Constructor for converting old style models
         name_mapping, obj_mapping = cls._convert_components_old_to_new(
             {c.name: c for c in model.components}
         )

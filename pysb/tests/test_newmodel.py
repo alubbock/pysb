@@ -50,6 +50,48 @@ class TestNewModelClass(TestCase):
         assert self.Model.A._repr_no_name() == 'Monomer()'
 
 
+from pysb.macros import equilibrate
+import sys
+class macro(object):
+    def __init__(self, func):
+        self._locals = {}
+        self.func = func
+
+    def __call__(self, *args, **kwargs):
+        def tracer(frame, event, arg):
+            if event == 'return':
+                self._locals = frame.f_locals.copy()
+
+        # tracer is activated on next call, return or exception
+        sys.setprofile(tracer)
+        try:
+            # trace the function call
+            res = self.func(*args, **kwargs)
+        finally:
+            # disable tracer and replace with old one
+            sys.setprofile(None)
+        return res
+
+    def clear_locals(self):
+        self._locals = {}
+
+    @property
+    def locals(self):
+        return self._locals
+
+
+def test_model_macro():
+    class MacroModel(Model):
+        A = Monomer()
+        B = Monomer()
+        macros = [
+            (equilibrate, A(), B(), [1, 2])
+        ]
+
+    print(MacroModel)
+    print(MacroModel().rules)
+
+
 def test_model_merge():
     class Model1(Model):
         A = Monomer(['a'])
@@ -65,6 +107,5 @@ def test_model_merge():
     print(Model3.B)
     print(Model3.export())
     print(Model3())
-    raise
 
 # TODO: Macros, model merging

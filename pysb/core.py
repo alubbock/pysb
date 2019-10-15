@@ -232,6 +232,10 @@ class Component(object):
             SelfExporter.rename(self, new_name)
         self.name = new_name
 
+    def component_dependencies(self):
+        """Return Component dependencies used by this Component"""
+        return set()
+
 
 class Monomer(Component):
     """
@@ -685,6 +689,14 @@ class MonomerPattern(object):
             value = '{} @ {}'.format(self._tag.name, value)
         return value
 
+    def component_dependencies(self):
+        deps = {self.monomer}
+        if self.compartment:
+            deps.add(self.compartment)
+        if self._tag:
+            deps.add(self._tag)
+        return deps
+
 
 class ComplexPattern(object):
 
@@ -1089,6 +1101,15 @@ class ComplexPattern(object):
             ret = '{} @ {}'.format(ret, self._tag.name)
         return ret
 
+    def component_dependencies(self):
+        deps = set.union(*(mp.component_dependencies()
+                         for mp in self.monomer_patterns))
+        if self.compartment:
+            deps.add(self.compartment)
+        if self._tag:
+            deps.add(self._tag)
+        return deps
+
 
 class ReactionPattern(object):
 
@@ -1164,6 +1185,11 @@ class ReactionPattern(object):
         from pysb.pattern import match_reaction_pattern
         return match_reaction_pattern(other, self)
 
+    def component_dependencies(self):
+        return set.union(*(cp.component_dependencies()
+                           for cp in self.complex_patterns)) \
+            if self.complex_patterns else set()
+
 
 class RuleExpression(object):
 
@@ -1198,6 +1224,10 @@ class RuleExpression(object):
         operator = '|' if self.is_reversible else '>>'
         return '%s %s %s' % (repr(self.reactant_pattern), operator,
                              repr(self.product_pattern))
+
+    def component_dependencies(self):
+        return set.union(self.reactant_pattern.component_dependencies(),
+                         self.product_pattern.component_dependencies())
 
 
 def as_complex_pattern(v):
@@ -1344,6 +1374,14 @@ class Compartment(Component):
             'None' if self.size is None else self.size.name
         )
 
+    def component_dependencies(self):
+        deps = set()
+        if self.parent:
+            deps.add(self.parent)
+        if self.size:
+            deps.add(self.size)
+        return deps
+
 
 class Rule(Component):
 
@@ -1471,6 +1509,12 @@ class Rule(Component):
         ret += ')'
         return ret
 
+    def component_dependencies(self):
+        deps = self.rule_expression.component_dependencies()
+        deps.add(self.rate_forward)
+        if self.rate_reverse:
+            deps.add(self.rate_reverse)
+        return deps
 
 
 def validate_expr(obj, description):
@@ -1580,6 +1624,9 @@ class Observable(Component, sympy.Symbol):
 
         return sympy.Function(self.name)(tag)
 
+    def component_dependencies(self):
+        return self.reaction_pattern.component_dependencies()
+
 
 class Expression(Component, sympy.Symbol):
 
@@ -1666,6 +1713,9 @@ class Expression(Component, sympy.Symbol):
                              'instance, for use within local Expressions')
 
         return sympy.Function(self.name)(tag)
+
+    def component_dependencies(self):
+        return self.expr.atoms(Component)
 
 
 class Tag(Component, sympy.Symbol):
@@ -1800,7 +1850,7 @@ class Model(object):
 
     """
 
-    _component_types = (Monomer, Compartment, Parameter, Tag, Expression, Rule,
+    _component_types = (Monomer, Parameter, Tag, Compartment, Expression, Rule,
                         Observable)
 
     def __init__(self, name=None, base=None, _export=True):
