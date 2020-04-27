@@ -389,7 +389,12 @@ class ScipyOdeSimulator(Simulator):
             self._logger.debug('Multi-processor (parallel) mode using {} '
                                'processes'.format(num_processors))
 
-        with _set_openblas_singlethread():
+        if num_processors == 1:
+            env = {}
+        else:
+            env = {'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1'}
+
+        with _set_environment(env):
             with SerialExecutor() if num_processors == 1 else \
                     ProcessPoolExecutor(max_workers=num_processors) as executor:
                 sim_partial = partial(_integrator_process, code_eqs=self._code_eqs, jac_eqs=self._jac_eqs,
@@ -472,18 +477,20 @@ def _set_cflags_no_warnings(logger):
 
 
 @contextlib.contextmanager
-def _set_openblas_singlethread():
+def _set_environment(env):
     """ Suppress cython warnings by setting -w flag """
-    env_var = 'OPENBLAS_NUM_THREADS'
-    orig_val = os.environ.get(env_var)
-    os.environ[env_var] = '1'
+    orig_env = {}
+    for env_var, env_val in env.items():
+        orig_env[env_var] = os.environ.get(env_var)
+        os.environ[env_var] = env_val
     try:
         yield
     finally:
-        if env_var is None:
-            del os.environ[env_var]
-        else:
-            os.environ[env_var] = orig_val
+        for env_var, env_val in orig_env.items():
+            if env_var is None:
+                del os.environ[env_var]
+            else:
+                os.environ[env_var] = env_val
 
 
 class _DistutilsProxyLoggerAdapter(logging.LoggerAdapter):
