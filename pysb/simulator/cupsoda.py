@@ -160,7 +160,8 @@ class CupSodaSimulator(Simulator):
             'memory_usage': 'sharedconstant'}}  # see _memory_options dict
 
     _integrator_options_allowed = {'max_steps', 'atol', 'rtol', 'n_blocks',
-                                   'memory_usage', 'vol', 'chunksize'}
+                                   'memory_usage', 'vol', 'chunksize',
+                                   'timeout'}
 
     def __init__(self, model, tspan=None, initials=None, param_values=None,
                  verbose=False, **kwargs):
@@ -178,6 +179,10 @@ class CupSodaSimulator(Simulator):
         self._prefix = re.sub('[^0-9a-zA-Z]', '_', self._prefix)
         self._base_dir = kwargs.pop('base_dir', None)
         self.integrator = kwargs.pop('integrator', 'cupsoda')
+        self._timeout = kwargs.pop('timeout', None)
+        if self._timeout is not None and (not isinstance(self._timeout, int)
+                or self._timeout <= 0):
+            raise ValueError('timeout must be None or an integer > 0')
         integrator_options = kwargs.pop('integrator_options', {})
 
         if kwargs:
@@ -551,6 +556,11 @@ class CupSodaSimulator(Simulator):
         # time_max
         with open(os.path.join(directory, "time_max"), 'w') as time_max:
             time_max.write(str(float(self.tspan[-1])))
+
+        # timeout, if applicable
+        if self._timeout:
+            with open(os.path.join(directory, "timeout"), 'w') as timeout:
+                timeout.write(str(self._timeout))
 
     def _get_cmatrix(self):
         if self.model.tags:
