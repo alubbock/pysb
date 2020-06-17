@@ -633,6 +633,7 @@ class CupSodaSimulator(Simulator):
             # determine optimal loading method
             if idx == 0:
                 (data, use_pandas) = self._test_pandas(filename)
+                self._logger.debug(f'Load using pandas: {use_pandas}')
             # load data
             else:
                 if use_pandas:
@@ -640,11 +641,12 @@ class CupSodaSimulator(Simulator):
                 else:
                     data = self._load_with_openfile(filename)
             # store data
-            tout[idx] = data[:, 0]
-            trajectories[idx][:, self._out_species] = data[:, 1:]
-            # volume correction
-            if self.vol:
-                trajectories[idx][:, self._out_species] *= (N_A * self.vol)
+            if data is not None:
+                tout[idx] = data[:, 0]
+                trajectories[idx][:, self._out_species] = data[:, 1:]
+                # volume correction
+                if self.vol:
+                    trajectories[idx][:, self._out_species] *= (N_A * self.vol)
         return np.array(tout), np.array(trajectories)
 
     def _test_pandas(self, filename):
@@ -677,16 +679,22 @@ class CupSodaSimulator(Simulator):
 
         return data, False
 
-    @staticmethod
-    def _load_with_pandas(filename):
-        data = pd.read_csv(filename, sep='\t', skiprows=None,
-                           header=None).as_matrix()
+    def _load_with_pandas(self, filename):
+        try:
+            data = pd.read_csv(filename, sep='\t', skiprows=None,
+                               header=None, dtype=np.float).as_matrix()
+        except ValueError:
+            data = self._load_with_openfile(filename)
         return data
 
-    @staticmethod
-    def _load_with_openfile(filename):
+    def _load_with_openfile(self, filename):
         with open(filename, 'r') as f:
             data = [line.rstrip('\n').split() for line in f]
+        if data and data[0] and data[0][0].startswith('ERROR:'):
+            errstr = '\n'.join(' '.join(r) for r in data)
+            self._logger.warning('Failed to load simulation result from file '
+                                 f'{filename}: {errstr}')
+            return None
         data = np.array(data, dtype=np.float, copy=False)
         return data
 
