@@ -743,8 +743,24 @@ class SimulationResult(object):
                 self._initials = simulator.initials_dict.copy()
             self._model = copy.deepcopy(simulator._model)
             self.simulator_class = simulator.__class__
-            self.init_kwargs = copy.deepcopy(simulator._init_kwargs)
-            self.run_kwargs = copy.deepcopy(simulator._run_kwargs)
+            try:
+                self.init_kwargs = copy.deepcopy(simulator._init_kwargs)
+            except TypeError as e:
+                simulator._logger.warning(
+                    'Error while pickling simulator init_kwargs; '
+                    'init_kwargs will not be saved in SimulationResult. '
+                    f'Details: {e}'
+                )
+                self._init_kwargs = {}
+            try:
+                self.run_kwargs = copy.deepcopy(simulator._run_kwargs)
+            except TypeError as e:
+                simulator._logger.warning(
+                    'Error while pickling simulator run_kwargs; '
+                    'run_kwargs will not be saved in SimulationResult. '
+                    f'Details: {e}'
+                )
+                self._run_kwargs = {}
         else:
             self._param_values = param_values
             self._initials = initials
