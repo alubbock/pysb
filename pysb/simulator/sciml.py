@@ -27,8 +27,10 @@ class SciMLSimulator(Simulator):
         The interface for this class is considered experimental and may
         change without warning as PySB is updated.
 
-    To use this module, you must first separately install Julia, which is a
+    To use this module, you must first install Julia, which is a
     separate language from Python: https://julialang.org/downloads/
+
+    You'll also need to install the diffeqpy Python package.
 
     If you receive an error when importing this class regarding Python not
     being compiled with shared library support, you can use an environment
@@ -108,14 +110,17 @@ class SciMLSimulator(Simulator):
 
         self._eqn_subs = {e: e.expand_expr(expand_observables=True) for
                           e in self._model.expressions}
+        self._eqn_subs.update({e: e.expand_expr(expand_observables=True) for
+                               e in self._model._derived_expressions})
 
         self._compiler = compiler
         if compiler == 'julia':
             jfn = 'function(du,u,p,t)\n'
             for i, ode in enumerate(self.model.odes):
                 jfn += f'du[{i + 1}] = {julia_code(ode.subs(self._eqn_subs))}\n'
-            jfn += 'end'
+            jfn += 'nothing\nend'
             jfn = self._eqn_substitutions(jfn)
+            self._logger.debug('Julia equation system:\n\n'+jfn)
             self._code_eqs = Main.eval(jfn)
         else:
             raise ValueError('Unknown compiler: {}'.format(compiler))
@@ -133,6 +138,9 @@ class SciMLSimulator(Simulator):
         """String substitutions on the Julia code for the ODE RHS and
         Jacobian functions to use appropriate terms for variables and
         parameters."""
+        # Replace vectorised .* with * (we're not multiplying any arrays)
+        eqns = eqns.replace('.*', '*')
+
         # Substitute 'y[i+1]' for '__si'
         eqns = re.sub(r'\b__s(\d+)\b',
                       lambda m: 'u[%s]' % (int(m.group(1)) + 1),
