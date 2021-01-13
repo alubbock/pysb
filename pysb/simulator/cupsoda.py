@@ -15,7 +15,7 @@ import shutil
 from pysb.pathfinder import get_path
 import sympy
 import collections
-
+from collections.abc import Iterable
 try:
     import pandas as pd
 except ImportError:
@@ -169,7 +169,7 @@ class CupSodaSimulator(Simulator):
                                                param_values=param_values,
                                                verbose=verbose, **kwargs)
         self.gpu = kwargs.pop('gpu', (0, ))
-        if not isinstance(self.gpu, collections.Iterable):
+        if not isinstance(self.gpu, Iterable):
             self.gpu = [self.gpu]
         self._obs_species_only = kwargs.pop('obs_species_only', True)
         self._cleanup = kwargs.pop('cleanup', True)
@@ -288,7 +288,7 @@ class CupSodaSimulator(Simulator):
             if p[gpu].returncode:
                 raise SimulatorException(
                     "cupSODA GPU {} chunk {} exception:\n{}\n{}".format(
-                        gpu, chunk_idx, p_out.rstip("at line"), p_err.rstrip()
+                        gpu, chunk_idx, p_out.rstrip("at line"), p_err.rstrip()
                     )
                 )
             tout_run, trajectories_run = self._load_trajectories(
@@ -553,6 +553,9 @@ class CupSodaSimulator(Simulator):
             time_max.write(str(float(self.tspan[-1])))
 
     def _get_cmatrix(self):
+        if self.model.tags:
+            raise ValueError('cupSODA does not currently support local '
+                             'functions')
         self._logger.debug("Constructing the c_matrix:")
         c_matrix = np.zeros((len(self.param_values), self._len_rxns))
         par_names = [p.name for p in self._model_parameters_rules]
@@ -667,7 +670,7 @@ class CupSodaSimulator(Simulator):
     @staticmethod
     def _load_with_pandas(filename):
         data = pd.read_csv(filename, sep='\t', skiprows=None,
-                           header=None).as_matrix()
+                           header=None).to_numpy()
         return data
 
     @staticmethod

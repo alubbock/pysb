@@ -14,10 +14,11 @@ import abc
 from warnings import warn
 import shutil
 import collections
+from collections.abc import Sequence
 import pysb.pathfinder as pf
 import tokenize
 from pysb.logging import get_logger, EXTENDED_DEBUG
-
+from sympy.logic.boolalg import Boolean
 try:
     from cStringIO import StringIO
 except ImportError:
@@ -120,7 +121,7 @@ class BngBaseInterface(object):
             return '"%s"' % param
         elif isinstance(param, bool):
             return 1 if param else 0
-        elif isinstance(param, (collections.Sequence, numpy.ndarray)):
+        elif isinstance(param, (Sequence, numpy.ndarray)):
             return list(param)
         return param
 
@@ -577,7 +578,7 @@ def run_ssa(model, t_end=10, n_steps=100, param_values=None, output_dir=None,
         Number of steps in the simulation.
     param_values : vector-like or dictionary, optional
             Values to use for every parameter in the model. Ordering is
-            determined by the order of model.parameters. 
+            determined by the order of model.parameters.
             If not specified, parameter values will be taken directly from
             model.parameters.
     output_dir : string, optional
@@ -707,7 +708,7 @@ def generate_equations(model, cleanup=True, verbose=False, **kwargs):
     * reactions
     * reactions_bidirectional
     * observables (just `coefficients` and `species` fields for each element)
-    
+
     Parameters
     ----------
     model : Model
@@ -782,13 +783,16 @@ def _parse_parameter(model, line):
     _, pname, pval, _, ptype = line.strip().split()
     par_names = model.components.keys()
     if pname not in par_names:
+        # Need to parse the value even for constants, since BNG considers some
+        # expressions to be "Constant", e.g. "2^2"
+        parsed_expr = parse_bngl_expr(pval, local_dict={
+            e.name: e for e in model.parameters | model.expressions})
         if ptype == 'Constant' and pname not in model._derived_parameters.keys():
-            p = pysb.core.Parameter(pname, pval, _export=False)
+            p = pysb.core.Parameter(pname, parsed_expr, _export=False)
             model._derived_parameters.add(p)
         elif ptype == 'ConstantExpression' and \
                 pname not in model._derived_expressions.keys():
-            p = pysb.core.Expression(pname, parse_bngl_expr(pval),
-                                     _export=False)
+            p = pysb.core.Expression(pname, parsed_expr, _export=False)
             model._derived_expressions.add(p)
         else:
             raise ValueError('Unknown type {} for parameter {}'.format(
@@ -929,6 +933,18 @@ def _convert_tokens(tokens, local_dict, global_dict):
     return tokens
 
 
+def _is_bool_expr(e):
+    return isinstance(e, Boolean) and not isinstance(e, sympy.AtomicExpr)
+
+
+def _fix_boolean_multiplication(*args):
+    args = [
+        sympy.Piecewise((1, a), (0, True)) if _is_bool_expr(a) else a
+        for a in args
+    ]
+    return sympy.Mul(*args)
+
+
 def parse_bngl_expr(text, *args, **kwargs):
     """Convert a BNGL math expression string to a sympy Expr."""
 
@@ -940,7 +956,13 @@ def parse_bngl_expr(text, *args, **kwargs):
         sympy_parser.standard_transformations
         + (sympy_parser.convert_equals_signs, _convert_tokens)
     )
-    expr = sympy_parser.parse_expr(text, *args, transformations=trans, **kwargs)
+    expr = sympy_parser.parse_expr(text, *args, transformations=trans,
+                                   evaluate=False, **kwargs)
+
+    # Replace Boolean multiplications, e.g. `2 * (3 > 0)`
+    # See https://github.com/pysb/pysb/pull/494
+    expr = expr.replace(sympy.Mul, _fix_boolean_multiplication)
+
     # Transforming 'if' to Piecewise requires subexpression rearrangement, so we
     # use sympy's replace functionality rather than attempt it using text
     # replacements above.
@@ -949,7 +971,7 @@ def parse_bngl_expr(text, *args, **kwargs):
         lambda cond, t, f: sympy.Piecewise((t, cond), (f, True))
     )
     # Check for unsupported constructs.
-    if expr.has('time'):
+    if expr.has(sympy.Symbol('time')):
         raise ValueError(
             "Expressions referencing simulation time are not supported"
         )

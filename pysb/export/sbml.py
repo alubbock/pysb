@@ -10,6 +10,7 @@ from pysb.export import Exporter
 from sympy.printing.mathml import MathMLPrinter
 from sympy import Symbol
 from xml.dom.minidom import Document
+import itertools
 try:
     import libsbml
 except ImportError:
@@ -140,7 +141,7 @@ class SbmlExporter(Exporter):
                 _check(c)
                 _check(c.setId(cpt.name))
                 _check(c.setSpatialDimensions(cpt.dimension))
-                _check(c.setSize(cpt.size.value))
+                _check(c.setSize(1 if cpt.size is None else cpt.size.value))
                 _check(c.setConstant(True))
         else:
             c = smodel.createCompartment()
@@ -151,7 +152,11 @@ class SbmlExporter(Exporter):
             _check(c.setConstant(True))
 
         # Expressions
-        for i, expr in enumerate(self.model.expressions):
+        for expr in itertools.chain(
+                self.model.expressions_constant(),
+                self.model.expressions_dynamic(include_local=False),
+                self.model._derived_expressions
+        ):
             # create an observable "parameter"
             e = smodel.createParameter()
             _check(e)
@@ -215,7 +220,8 @@ class SbmlExporter(Exporter):
 
         # Parameters
 
-        for i, param in enumerate(self.model.parameters):
+        for param in itertools.chain(self.model.parameters,
+                                     self.model._derived_parameters):
             p = smodel.createParameter()
             _check(p)
             _check(p.setId(param.name))

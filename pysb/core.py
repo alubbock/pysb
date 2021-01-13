@@ -12,6 +12,7 @@ import sympy
 import numpy as np
 import scipy.sparse
 import networkx as nx
+from collections.abc import Iterable, Mapping, Sequence, Set
 
 try:
     reload
@@ -153,6 +154,16 @@ class SelfExporter(object):
                              "name '%s'" % obj.name)
 
 
+class Symbol(sympy.Dummy):
+    def __new__(cls, name, real=True, **kwargs):
+        return super(Symbol, cls).__new__(cls, name, real=real, **kwargs)
+
+    def _lambdacode(self, printer, **kwargs):
+        """ custom printer method that ensures that the dummyid is not
+        appended when printing code """
+        return self.name
+
+
 class Component(object):
 
     """
@@ -280,7 +291,7 @@ class Monomer(Component):
 
         # ensure sites is some kind of list (presumably of strings) but not a
         # string itself
-        if not isinstance(sites, collections.Iterable) or \
+        if not isinstance(sites, Iterable) or \
                isinstance(sites, basestring):
             raise ValueError("sites must be a list of strings")
 
@@ -318,9 +329,9 @@ class Monomer(Component):
 
         Parameters
         ----------
-        conditions : dict, optional
+        conditions: dict, optional
             See MonomerPattern.site_conditions.
-        **kwargs : dict
+        **kwargs: Union[None, int, str, Tuple[str,int], MultiSite, List[int]]
             See MonomerPattern.site_conditions.
 
         """
@@ -644,6 +655,9 @@ class MonomerPattern(object):
     def __or__(self, other):
         return build_rule_expression(self, other, True)
 
+    def __ror__(self, other):
+        return build_rule_expression(other, self, True)
+
     def __ne__(self, other):
         warnings.warn("'<>' for reversible rules will be removed in a future "
                       "version of PySB. Use '|' instead.",
@@ -727,6 +741,11 @@ class ComplexPattern(object):
         # ensure compartment is a Compartment
         if compartment and not isinstance(compartment, Compartment):
             raise Exception("compartment is not a Compartment object")
+
+        # Drop species cpt, if redundant
+        if compartment and len(monomer_patterns) == 1 and \
+                monomer_patterns[0].compartment == compartment:
+            compartment = None
 
         self.monomer_patterns = monomer_patterns
         self.compartment = compartment
@@ -1055,6 +1074,9 @@ class ComplexPattern(object):
     def __or__(self, other):
         return build_rule_expression(self, other, True)
 
+    def __ror__(self, other):
+        return build_rule_expression(other, self, True)
+
     def __ne__(self, other):
         warnings.warn("'<>' for reversible rules will be removed in a future "
                       "version of PySB. Use '|' instead.",
@@ -1270,7 +1292,7 @@ def build_rule_expression(reactant, product, is_reversible):
     return RuleExpression(reactant, product, is_reversible)
 
 
-class Parameter(Component, sympy.Symbol):
+class Parameter(Component, Symbol):
 
     """
     Model component representing a named constant floating point number.
@@ -1284,38 +1306,62 @@ class Parameter(Component, sympy.Symbol):
         The numerical value of the parameter. Defaults to 0.0 if not specified.
         The provided value is converted to a float before being stored, so any
         value that cannot be coerced to a float will trigger an exception.
+    nonnegative : bool, optional
+        Sets the assumption whether this parameter is nonnegative (>=0).
+        Affects simplifications of expressions that involve this parameter.
+        By default, parameters are assumed to be non-negative.
+    integer : bool, optional
+        Sets the assumption whether this parameter takes integer values,
+        which affects simplifications of expressions that involve this
+        parameter. By default, parameters are not assumed to take integer values.
 
     Attributes
     ----------
-    Identical to Parameters (see above).
+    value (see Parameters above).
 
     """
 
-    def __new__(cls, name, value=0.0, _export=True):
-        return super(sympy.Symbol, cls).__new__(cls, name)
+    def __new__(cls, name, value=0.0, nonnegative=True, integer=False,
+                _export=True):
+
+        return super(Parameter, cls).__new__(cls, name, real=True,
+                                             nonnegative=nonnegative,
+                                             integer=integer)
 
     def __getnewargs__(self):
         return (self.name, self.value, False)
 
-    def __init__(self, name, value=0.0, _export=True):
-        self.value = float(value)
+    def __init__(self, name, value=0.0, _export=True, **kwargs):
+        self.value = value
         Component.__init__(self, name, _export)
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, new_value):
+        self.check_value(new_value)
+        self._value = float(new_value)
     
     def get_value(self):
         return self.value
-    
-    # This is needed to make sympy's evalf machinery treat this class like a
-    # Symbol.
-    @property
-    def func(self):
-        return sympy.Symbol
+
+    def check_value(self, value):
+        if self.is_integer:
+            if not float(value).is_integer():
+                raise ValueError('Cannot assign an non-integer value to a '
+                                 'parameter assumed to be an integer')
+        if self.is_nonnegative:
+            if float(value) < 0:
+                raise ValueError('Cannot assign a negative value to a '
+                                 'parameter assumed to be nonnegative')
 
     def __repr__(self):
-        return  '%s(%s, %s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
+        return '%s(%s, %s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
 
     def __str__(self):
-        return  repr(self)
-
+        return repr(self)
 
 
 class Compartment(Component):
@@ -1331,9 +1377,10 @@ class Compartment(Component):
     dimension : integer, optional
         The number of spatial dimensions in the compartment, either 2 (i.e. a
         membrane) or 3 (a volume).
-    size : Parameter, optional
-        A parameter object whose value defines the volume or area of the
-        compartment. If not specified, the size will be fixed at 1.0.
+    size : Parameter or Expression, optional
+        A parameter or constant expression object whose value defines the
+        volume or area of the compartment. If not specified, the size will be
+        fixed at 1.0.
 
     Attributes
     ----------
@@ -1358,8 +1405,10 @@ class Compartment(Component):
         if parent != None and isinstance(parent, Compartment) == False:
             raise Exception("parent must be a predefined Compartment or None")
         #FIXME: check for only ONE "None" parent? i.e. only one compartment can have a parent None?
-        if size is not None and not isinstance(size, Parameter):
-            raise Exception("size must be a parameter (or omitted)")
+        if size is not None and not isinstance(size, Parameter) and not \
+                (isinstance(size, Expression) and size.is_constant_expression()):
+            raise Exception("size must be a parameter or a constant expression"
+                            " (or omitted)")
         self.parent = parent
         self.dimension = dimension
         self.size = size
@@ -1393,9 +1442,9 @@ class Rule(Component):
     rule_expression : RuleExpression
         RuleExpression containing the essence of the rule (reactants, products,
         reversibility).
-    rate_forward : Parameter
+    rate_forward : Union[Parameter,Expression]
         Forward reaction rate constant.
-    rate_reverse : Parameter, optional
+    rate_reverse : Union[Parameter,Expression], optional
         Reverse reaction rate constant (only required for reversible rules).
     delete_molecules : bool, optional
         If True, deleting a Monomer from a species is allowed to fragment the
@@ -1425,6 +1474,9 @@ class Rule(Component):
         validate_expr(rate_forward, "forward rate")
         if rule_expression.is_reversible:
             validate_expr(rate_reverse, "reverse rate")
+        elif rate_reverse:
+            raise ValueError('Reverse rate specified, but rule expression is '
+                             'not reversible. Use | instead of >>.')
         self.rule_expression = rule_expression
         self.reactant_pattern = rule_expression.reactant_pattern
         self.product_pattern = rule_expression.product_pattern
@@ -1535,7 +1587,7 @@ def validate_const_expr(obj, description):
 
 
 
-class Observable(Component, sympy.Symbol):
+class Observable(Component, Symbol):
 
     """
     Model component representing a linear combination of species.
@@ -1575,7 +1627,7 @@ class Observable(Component, sympy.Symbol):
     """
 
     def __new__(cls, name, reaction_pattern, match='molecules', _export=True):
-        return super(sympy.Symbol, cls).__new__(cls, name)
+        return super(Observable, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return (self.name, self.reaction_pattern, self.match, False)
@@ -1592,12 +1644,6 @@ class Observable(Component, sympy.Symbol):
         self.match = match
         self.species = []
         self.coefficients = []
-
-    # This is needed to make sympy's evalf machinery treat this class like a
-    # Symbol.
-    @property
-    def func(self):
-        return sympy.Symbol
 
     def expand_obs(self):
         """ Expand observables in terms of species and coefficients """
@@ -1628,7 +1674,7 @@ class Observable(Component, sympy.Symbol):
         return self.reaction_pattern.component_dependencies()
 
 
-class Expression(Component, sympy.Symbol):
+class Expression(Component, Symbol):
 
     """
     Model component representing a symbolic expression of other variables.
@@ -1646,7 +1692,7 @@ class Expression(Component, sympy.Symbol):
     """
 
     def __new__(cls, name, expr, _export=True):
-        return super(sympy.Symbol, cls).__new__(cls, name)
+        return super(Expression, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return (self.name, self.expr, False)
@@ -1686,12 +1732,6 @@ class Expression(Component, sympy.Symbol):
                 subs[a] = a.get_value()
         return self.expr.xreplace(subs)
 
-    # This is needed to make sympy's evalf machinery treat this class like a
-    # Symbol.
-    @property
-    def func(self):
-        return sympy.Symbol
-
     @property
     def is_local(self):
         return len(self.expr.atoms(Tag)) > 0
@@ -1700,8 +1740,12 @@ class Expression(Component, sympy.Symbol):
         return sorted(self.expr.atoms(Tag), key=lambda tag: tag.name)
 
     def __repr__(self):
+        if isinstance(self.expr, (Parameter, Expression)):
+            expr_repr = self.expr.name
+        else:
+            expr_repr = repr(self.expr)
         ret = '%s(%s, %s)' % (self.__class__.__name__, repr(self.name),
-                              repr(self.expr))
+                              expr_repr)
         return ret
 
     def __str__(self):
@@ -1718,10 +1762,10 @@ class Expression(Component, sympy.Symbol):
         return self.expr.atoms(Component)
 
 
-class Tag(Component, sympy.Symbol):
+class Tag(Component, Symbol):
     """Tag for labelling MonomerPatterns and ComplexPatterns"""
     def __new__(cls, name, _export=True):
-        return super(sympy.Symbol, cls).__new__(cls, name)
+        return super(Tag, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return self.name, False
@@ -1882,6 +1926,7 @@ class Model(object):
                 self.add_component(component)
                 component._do_export()
             self.initials = model_copy.initials
+            self.annotations = model_copy.annotations
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -2264,7 +2309,7 @@ class ModelNotDefinedError(RuntimeError):
         )
 
 
-class ComponentSet(collections.Set, collections.Mapping, collections.Sequence):
+class ComponentSet(Set, Mapping, Sequence):
     """
     An add-and-read-only container for storing model Components.
 
@@ -2472,7 +2517,7 @@ class ComponentSet(collections.Set, collections.Mapping, collections.Sequence):
         # We require other to be a ComponentSet too so we know it will support
         # "in" efficiently.
         if not isinstance(other, ComponentSet):
-            return collections.Set.__and__(self, other)
+            return Set.__and__(self, other)
         return ComponentSet(value for value in self if value in other)
 
     def __rand__(self, other):
@@ -2496,7 +2541,7 @@ class ComponentSet(collections.Set, collections.Mapping, collections.Sequence):
             del m[c.name]
 
 
-class OdeView(collections.Sequence):
+class OdeView(Sequence):
     """Compatibility shim for the Model.odes property."""
 
     # This is necessarily coupled pretty tightly with Model. Note that we
@@ -2522,7 +2567,7 @@ class OdeView(collections.Sequence):
         return len(self.model.species)
 
 
-class InitialConditionsView(collections.Sequence):
+class InitialConditionsView(Sequence):
     """Compatibility shim for the Model.initial_conditions property."""
 
     def __init__(self, model):
@@ -2564,6 +2609,10 @@ class RedundantSiteConditionsError(ValueError):
 
 
 class DanglingBondError(ValueError):
+    pass
+
+
+class ReusedBondError(ValueError):
     pass
 
 # Some light infrastructure for defining symbols that act like "keywords", i.e.

@@ -4,6 +4,7 @@ import pysb
 from pysb.core import MultiState
 import sympy
 from sympy.printing import StrPrinter
+from sympy.printing.precedence import precedence
 
 # Alias basestring under Python 3 for forwards compatibility
 try:
@@ -46,7 +47,7 @@ class BngGenerator(object):
         max_length = max(len(p.name) for p in
                          self.model.parameters | self.model.expressions)
         for p in self.model.parameters:
-            self.__content += (("  %-" + str(max_length) + "s   %e\n") %
+            self.__content += (("  %-" + str(max_length) + "s   %.17g\n") %
                                (p.name, p.value))
         for e in exprs:
             self.__content += (("  %-" + str(max_length) + "s   %s\n") %
@@ -287,11 +288,16 @@ class BngPrinter(StrPrinter):
 
         if_stmt = expr.args[-1][0]
         for pos in range(len(expr.args) - 2, -1, -1):
-            if_stmt = 'if({},{},{})'.format(expr.args[pos][1],
-                                            expr.args[pos][0],
-                                            if_stmt)
+            if_stmt = 'if({},{},{})'.format(
+                self._print(expr.args[pos][1]),
+                self._print(expr.args[pos][0]),
+                self._print(if_stmt)
+            )
 
         return if_stmt
+
+    def _print_Dummy(self, expr):
+        return expr.name
 
     def _print_Pow(self, expr, rational=False):
         return super(BngPrinter, self)._print_Pow(expr, rational)\
@@ -302,6 +308,18 @@ class BngPrinter(StrPrinter):
 
     def _print_Or(self, expr):
         return super(BngPrinter, self)._print_Or(expr).replace('|', '||')
+
+    def _print_Relational(self, expr):
+        if getattr(expr, "rel_op", None) not in {"==", "!=", "<", "<=", ">", ">="}:
+            raise NotImplementedError(
+                "Relational operator not supported: %s" % type(expr).__name__
+            )
+        # Adapted from StrPrinter._print_Relational.
+        return '%s %s %s' % (
+            self.parenthesize(expr.lhs, precedence(expr)),
+            expr.rel_op,
+            self.parenthesize(expr.rhs, precedence(expr)),
+        )
 
     def _print_log(self, expr):
         # BNG doesn't accept "log", only "ln".

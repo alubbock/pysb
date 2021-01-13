@@ -3,17 +3,23 @@ import numpy as np
 import itertools
 import sympy
 import collections
+from collections.abc import Mapping, Sequence
 import numbers
 from pysb.core import MonomerPattern, ComplexPattern, as_complex_pattern, \
-                      Parameter, Expression, Tag
+                      Parameter, Expression, Model, ComponentSet
 from pysb.logging import get_logger, EXTENDED_DEBUG
 import pickle
+from pysb.export.json import JsonExporter
+from pysb.importers.json import model_from_json
 from pysb import __version__ as PYSB_VERSION
 from datetime import datetime
 import dateutil.parser
 import copy
 from warnings import warn
 from pysb.pattern import SpeciesPatternMatcher
+from pysb.bng import generate_equations
+from contextlib import contextmanager
+import weakref
 try:
     basestring
 except NameError:
@@ -32,6 +38,14 @@ except ImportError:
 
 class SimulatorException(Exception):
     pass
+
+
+class InconsistentParameterError(SimulatorException, ValueError):
+    def __init__(self, parameter_name, value, reason):
+        super(InconsistentParameterError, self).__init__(
+            f'Value {value} that was passed for parameter {parameter_name} '
+            f'was inconsistent with that parameters assumption: {reason}'
+        )
 
 
 class Simulator(object):
@@ -163,7 +177,7 @@ class Simulator(object):
                 return len(self.param_values)
 
     def _update_initials_dict(self, initials_dict, initials_source, subs=None):
-        if isinstance(initials_source, collections.Mapping):
+        if isinstance(initials_source, Mapping):
             # Can't just use .update() as we need to test
             # equality with .is_equivalent_to()
             for cp, value_obj in initials_source.items():
@@ -172,7 +186,7 @@ class Simulator(object):
                        for existing_cp in initials_dict):
                     continue
 
-                if isinstance(value_obj, (collections.Sequence, np.ndarray))\
+                if isinstance(value_obj, (Sequence, np.ndarray))\
                         and all(isinstance(v, numbers.Number) for v in value_obj):
                     value = value_obj
                 elif isinstance(value_obj, Expression):
@@ -272,17 +286,17 @@ class Simulator(object):
 
         # Check potential quick return options
         if self._run_initials is not None:
-            if not isinstance(self._run_initials, collections.Mapping) and \
+            if not isinstance(self._run_initials, Mapping) and \
                     self._initials is None:
                 return self._run_initials
-        elif not isinstance(self._initials, collections.Mapping) and \
+        elif not isinstance(self._initials, Mapping) and \
                 self._initials is not None:
             return self._initials
 
         # At this point (after dimensionality check), we can return
         # self._run_initials if it's not a dictionary and not None
         if self._run_initials is not None and not isinstance(
-                self._run_initials, collections.Mapping):
+                self._run_initials, Mapping):
             return self._run_initials
 
         n_sims_initials = self._check_run_initials_vs_base_initials_length()
@@ -326,7 +340,7 @@ class Simulator(object):
                                      'MonomerPattern or ComplexPattern' %
                                      repr(cplx_pat))
                 # if val is a number, convert it to a single-element array
-                if not isinstance(val, (collections.Sequence, np.ndarray)):
+                if not isinstance(val, (Sequence, np.ndarray)):
                     val = [val]
                     new_initials[cplx_pat] = np.array(val)
                 # otherwise, check whether simulator supports multiple
@@ -463,13 +477,22 @@ class Simulator(object):
                     raise IndexError("new_params dictionary has unknown "
                                      "parameter name (%s)" % key)
                 # if val is a number, convert it to a single-element array
-                if not isinstance(val, collections.Sequence):
+                if not isinstance(val, Sequence):
                     val = [val]
                     new_params[key] = np.array(val)
                 # Check all elements are the same length
                 if len(val) != n_sims:
                     raise ValueError("all arrays in params dictionary "
                                      "must be equal length")
+
+                for value in val:
+                    try:
+                        self._model.parameters[key].check_value(value)
+                    except ValueError as e:
+                        raise InconsistentParameterError(
+                            key, value, str(e)
+                        )
+
         elif isinstance(new_params, np.ndarray):
             # if new_params is a 1D array, convert to a 2D array of length 1
             if len(new_params.shape) == 1:
@@ -479,6 +502,18 @@ class Simulator(object):
             if new_params.shape[1] != len(self._model.parameters):
                 raise ValueError("new_params must be the same length as "
                                  "model.parameters")
+
+            for isim in range(n_sims):
+                for param, value in zip(self._model.parameters,
+                                        new_params[isim, :]):
+                    try:
+                        param.check_value(value)
+                    except ValueError as e:
+                        raise InconsistentParameterError(
+                            param.name, value, str(e)
+                        )
+
+
         else:
             raise ValueError(
                 'Implicit conversion of data type "{}" is not '
@@ -490,6 +525,7 @@ class Simulator(object):
             raise ValueError(
                 self.__class__.__name__ +
                 " does not support multiple parameter values at this time.")
+
         return new_params
 
     def _reset_run_overrides(self):
@@ -800,14 +836,15 @@ class SimulationResult(object):
                 len(tout[n]) * len(expr_names)).view(dtype=yexpr_dtype) for n
                           in range(self.nsims)]
         else:
-            self._yobs = [np.ndarray((len(self.tout[n]),),
-                                     dtype=yobs_dtype) for n in range(self.nsims)]
+            self._yobs = [np.ndarray((len(self.tout[n]),), dtype=yobs_dtype) if obs_names
+                          else np.ndarray((len(self.tout[n]), 0), dtype=yobs_dtype)
+                          for n in range(self.nsims)]
             self._yobs_view = [self._yobs[n].view(float).
-                               reshape(len(self._yobs[n]), -1) for n in range(
+                                   reshape(len(self._yobs[n]), -1) for n in range(
                 self.nsims)]
-            self._yexpr = [np.ndarray((len(self.tout[n]),),
-                                      dtype=yexpr_dtype) for n in range(
-                self.nsims)]
+            self._yexpr = [np.ndarray((len(self.tout[n]),), dtype=yexpr_dtype) if expr_names
+                           else np.ndarray((len(self.tout[n]), 0), dtype=yexpr_dtype)
+                           for n in range(self.nsims)]
             self._yexpr_view = [self._yexpr[n].view(float).reshape(len(
                 self._yexpr[n]), -1) for n in range(self.nsims)]
 
@@ -1059,7 +1096,7 @@ class SimulationResult(object):
         multiple SimulationResults for a specific model.
 
         A group is first created in the HDF file root (see group_name
-        argument). Within that group, a dataset "_model" has a pickled
+        argument). Within that group, a dataset "_model" has a JSON
         version of the PySB model. SimulationResult are stored as groups
         within the model group.
 
@@ -1112,15 +1149,22 @@ class SimulationResult(object):
 
         # np.void maps to bytes in HDF5.
         enpickle = lambda obj: np.void(pickle.dumps(obj, -1))
+        model_json = JsonExporter(self._model).export(include_netgen=True)
 
         with h5py.File(filename, 'a' if append else 'w-') as hdf:
             # Get or create the group
             try:
                 grp = hdf.create_group(group_name)
-                grp.create_dataset('_model', data=enpickle(self._model))
+                grp.create_dataset('_model_json', data=model_json)
+                if '_model' in grp:
+                    raise ValueError()
             except ValueError:
                 grp = hdf[group_name]
-                model = pickle.loads(grp['_model'][()])
+                if '_model_json' in grp:
+                    model = model_from_json(grp['_model_json'][()])
+                else:
+                    with _patch_model_setstate():
+                        model = pickle.loads(grp['_model'][()])
                 if model.name != self._model.name:
                     raise ValueError('SimulationResult model has name "{}", '
                                      'but the model in HDF5 file group "{}" '
@@ -1210,8 +1254,8 @@ class SimulationResult(object):
             grp = hdf[group_name]
 
             if dataset_name is None:
-                datasets = list(grp.keys())
-                datasets.remove('_model')
+                datasets = [k for k in grp.keys() if k not in
+                            ('_model', '_model_json')]
                 if len(datasets) > 1:
                     raise ValueError("dataset_name must be specified when "
                                      "group contains more than one dataset. "
@@ -1223,10 +1267,10 @@ class SimulationResult(object):
             obs_and_exprs = None
 
             if 'observables' in dset.keys():
-                obs_and_exprs = list(dset['observables'])
+                obs_and_exprs = list(dset['observables'][:])
 
             if 'expressions' in dset.keys():
-                exprs = dset['expressions']
+                exprs = dset['expressions'][:]
                 if obs_and_exprs is None:
                     obs_and_exprs = list(exprs)
                 else:
@@ -1238,21 +1282,30 @@ class SimulationResult(object):
 
             trajectories = None
             try:
-                trajectories = dset['trajectories']
+                trajectories = dset['trajectories'][:]
             except KeyError:
                 pass
 
             try:
-                initials = np.array(dset['initials'])
+                initials = dset['initials'][:]
             except KeyError:
                 initials = pickle.loads(dset['initials_dict'][()])
 
+            if '_model_json' in grp:
+                model = model_from_json(grp['_model_json'][()])
+            else:
+                warn('The SimulationResult file uses an old model '
+                     'format (pickled). It\'s recommended you re-save '
+                     'the SimulationResult to use the new format (JSON).')
+                with _patch_model_setstate():
+                    model = pickle.loads(grp['_model'][()])
+
             simres = cls(
                 simulator=None,
-                model=pickle.loads(grp['_model'][()]),
+                model=model,
                 initials=initials,
-                param_values=np.array(dset['param_values']),
-                tout=np.array(dset['tout']),
+                param_values=dset['param_values'][:],
+                tout=dset['tout'][:],
                 trajectories=trajectories,
                 observables_and_expressions=obs_and_exprs,
                 squeeze=dset.attrs['squeeze'],
@@ -1288,3 +1341,24 @@ def _allow_unicode_recarray():
     except TypeError:
         return False
     return True
+
+
+def _model_setstate_monkey_patch(self, state):
+    """Monkey patch for Model.__setstate__ for restoring from older pickles"""
+
+    # restore the 'model' weakrefs on all components
+    self.__dict__.update(state)
+    # Set "tags" attribute for older, pickled models
+    self.__dict__.setdefault('tags', ComponentSet())
+    for c in self.all_components():
+        c.model = weakref.ref(self)
+
+
+@contextmanager
+def _patch_model_setstate():
+    old_setstate = Model.__setstate__
+    Model.__setstate__ = _model_setstate_monkey_patch
+    try:
+        yield
+    finally:
+        Model.__setstate__ = old_setstate

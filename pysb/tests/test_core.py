@@ -193,6 +193,17 @@ def test_compartment_initial_error():
     Initial(A(s=None)**c2, A_0)
 
 @with_model
+def test_compartment():
+    # Ensure that compartment size can be specified by a parameter,
+    #  a constant expression, or be omitted.
+    Parameter('A', 1.0)
+    Parameter('B', 2.0)
+    Expression('E', A * B)
+    Compartment("C1")
+    Compartment("C2", C1, 2, A)
+    Compartment("C3", C1, 2, E)
+
+@with_model
 def test_monomer_pattern_add_to_none():
     """Ensure that MonomerPattern + None returns a ReactionPattern."""
     Monomer('A', ['s'])
@@ -530,6 +541,13 @@ def test_invalid_parameter():
 @with_model
 def test_invalid_compartment():
     assert_raises(Exception, Compartment, 'c1', 'invalid_parent')
+
+    # Invalid dynamic expression as compartment size
+    Monomer('A')
+    Observable('O', A)
+    Expression('E', O)
+    assert_raises(Exception, Compartment, 'c2', size=E)
+
     assert len(model.compartments) == 0
 
 
@@ -556,3 +574,67 @@ def test_update_initial_condition():
 
 def test_model_not_defined():
     assert_raises(ModelNotDefinedError, Monomer, 'A')
+
+
+@raises(ReusedBondError)
+@with_model
+def test_bind_multiple():
+    Monomer('A', ['a'])
+    Monomer('B', ['b'])
+
+    as_reaction_pattern(A(a=1) % B(b=1) % B(b=1))
+
+
+@raises(ValueError)
+@with_model
+def test_reverse_rate_non_reversible_rule():
+    Monomer('A')
+    Parameter('kf', 1)
+    Parameter('kr', 2)
+    Rule('r1', None >> A(), kf, kr)
+
+
+@with_model
+def test_parameter_assumptions():
+    Parameter('k1', 0.0)
+    assert k1.is_real
+    assert k1.is_nonnegative
+    assert not k1.is_integer
+    Parameter('k2', 0.0, nonnegative=False)
+    assert not k2.is_nonnegative
+    Parameter('k3', 0.0, integer=True)
+    assert k3.is_integer
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_noninteger_integer_init():
+    Parameter('k3', 0.3, integer=True)
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_noninteger_integer_setter():
+    Parameter('k3', 1.0, integer=True)
+    k3.value = 0.4
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_negative_nonnegative_init():
+    Parameter('k3', -0.2, nonnegative=True)
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_negative_nonnegative_setter():
+    Parameter('k3', 0.0, nonnegative=True)
+    k3.value = -0.2
+
+
+@with_model
+def test_reversible_synthesis():
+    Monomer('A')
+    Parameter('k', 1)
+    Rule('r1', None | A(), k, k)
+    Rule('r2', None | as_complex_pattern(A()), k, k)
