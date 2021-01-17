@@ -1,11 +1,12 @@
 build: false
 
 environment:
+  MINICONDA: C:\Miniconda37-x64
   matrix:
-    - PYTHON_VERSION: 3.6
-      MINICONDA: C:\Miniconda36-x64
     - PYTHON_VERSION: 3.7
-      MINICONDA: C:\Miniconda37-x64
+    - PYTHON_VERSION: 3.8
+    - PYTHON_VERSION: 3.9
+      
 init:
   - "ECHO %PYTHON_VERSION% %MINICONDA%"
 
@@ -27,11 +28,8 @@ install:
   - conda install -c conda-forge "numpy>=1.14" scipy matplotlib sympy
     networkx nose h5py pandas mkl pydot mock cython
 
-  - conda install -c SBMLTeam python-libsbml
+  - pip install python-libsbml
 
-  - conda install -c alubbock graphviz bionetgen atomizer kappa stochkit-lite
-
-  # Build PySB
-  - python setup.py build --build-lib=build/lib
+  - conda install -c alubbock pygraphviz bionetgen atomizer kappa stochkit-lite
 test_script:
-  - nosetests build/lib/pysb -a "!gpu"
+  - python setup.py nosetests -a "!gpu"
