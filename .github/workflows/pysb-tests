@@ -1,0 +1,25 @@
+name: PySB tests
+
+on: [push]
+
+jobs:
+  build-linux:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        python-version: ["3.6", "3.7", "3.8", "3.9"]
+
+    steps:
+    - uses: actions/checkout@v2
+    - uses: conda-incubator/setup-miniconda@v2
+      with:
+        auto-update-conda: true
+        python-version: ${{ matrix.python-version }}
+        activate-environment: pysb
+        channels: alubbock, conda-forge
+        environment-file: pysb-conda-env.yml
+    - name: Build PySB
+      run: python setup.py build --build-lib=build/lib
+    - name: Run nosetests
+      run: nosetests build/lib/pysb --with-coverage --cover-inclusive --cover-package=build/lib/pysb -a '!gpu'
