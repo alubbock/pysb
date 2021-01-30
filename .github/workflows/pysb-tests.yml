@@ -17,6 +17,7 @@ jobs:
         auto-update-conda: true
         python-version: ${{ matrix.python-version }}
         environment-file: pysb-conda-env.yml
+        activate-environment: pysb
     - name: Conda environment info
       run: |
         conda info
