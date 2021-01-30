@@ -16,9 +16,11 @@ jobs:
       with:
         auto-update-conda: true
         python-version: ${{ matrix.python-version }}
-        activate-environment: pysb
-        channels: alubbock, conda-forge
         environment-file: pysb-conda-env.yml
+    - name: Conda environment info
+      run: |
+        conda info
+        conda list
     - name: Build PySB
       run: python setup.py build --build-lib=build/lib
     - name: Run nosetests
