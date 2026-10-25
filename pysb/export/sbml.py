@@ -21,12 +21,13 @@ Supported features
   ``<csymbol>`` per Level 3 section 3.4.6
 * Multiple compartments: species are assigned to their monomer-level
   compartment
-* Volume correction: BNG's network generator produces concentration-based
-  rates (``dC/dt``).  SBML kinetic laws represent flux in amount/time
-  (``J = dN/dt = V * dC/dt``), so the exporter multiplies each kinetic law
-  by ``V^n`` where *n* is the number of reactant molecules.  Species are
-  exported with ``hasOnlySubstanceUnits=False`` so kinetic-law species
-  symbols are interpreted as concentrations, matching BNG's convention.
+* Amounts and compartment volumes: PySB/BNG species values are amounts, and
+  the rate constants of BNG's generated reactions already include the cBNGL
+  compartment-size scaling.  Each reaction's rate is therefore exactly the
+  amount flux (``J = dN/dt``) that an SBML kinetic law expects, and is
+  exported verbatim.  Species are exported with
+  ``hasOnlySubstanceUnits="true"`` so that species symbols in kinetic laws
+  are amounts and initial values are initial amounts.
 
 Known limitations
 -----------------
@@ -266,9 +267,9 @@ class SbmlExporter(Exporter):
             _check(sp.setName(str(s).replace("% ", "._br_")))
             _check(sp.setBoundaryCondition(i in fixed_species_idx))
             _check(sp.setConstant(False))
-            _check(sp.setHasOnlySubstanceUnits(False))
+            _check(sp.setHasOnlySubstanceUnits(True))
             if i not in initial_species_idx:
-                _check(sp.setInitialConcentration(0.0))
+                _check(sp.setInitialAmount(0.0))
 
         # Parameters
 
@@ -285,12 +286,8 @@ class SbmlExporter(Exporter):
         # Reactions
         # Use the unidirectional reaction list so each reaction has a single
         # well-defined set of reactants and a single BNG rate expression.
-        # BNG rates are concentration-based (dC/dt), while SBML kinetic laws
-        # represent amount flux (J = dN/dt = V * dC/dt).  For a reaction with
-        # n reactant molecules in compartment of volume V, the relationship is:
-        #   J = V^n * BNG_rate
-        # (BNG embeds 1/V^(n-1) for mass-action, giving dC/dt = BNG_rate;
-        # multiplying by V restores J in amount/time units.)
+        # BNG's rates are amount fluxes that already include the cBNGL
+        # compartment-size scaling, so they are valid SBML kinetic laws as is.
         for i, reaction in enumerate(self.model.reactions):
             rxn = smodel.createReaction()
             _check(rxn)
@@ -341,60 +338,9 @@ class SbmlExporter(Exporter):
                                 _check(modifier)
                                 _check(modifier.setSpecies(str(sym)))
 
-            # Volume correction: determine V for the reaction compartment.
-            # For reactions with reactants, use the reactant compartment.
-            # For synthesis (no reactants), use the product compartment.
-            # For models without explicit compartments, V = 1 (no correction).
-            bng_rate = reaction["rate"]
-            if self.model.compartments:
-                # Use net-consumed molecule count for the V^n exponent.
-                # BNG embeds 1/V^(n-1) for mass-action, where n is the number
-                # of *net-consumed* reactant molecules (reactant count minus the
-                # count of identical species that also appear as products, i.e.
-                # catalysts).  Using the raw reactant count over-corrects for
-                # catalyst reactions such as B+B->C+B (net consumed = 1, not 2).
-                reactant_counts = {}
-                for sp in reaction["reactants"]:
-                    reactant_counts[sp] = reactant_counts.get(sp, 0) + 1
-                product_counts = {}
-                for sp in reaction["products"]:
-                    product_counts[sp] = product_counts.get(sp, 0) + 1
-                n_reac = sum(
-                    max(0, r - product_counts.get(sp, 0))
-                    for sp, r in reactant_counts.items()
-                )
-                # Identify the reference species list (reactants if present,
-                # otherwise products) to determine the reaction compartment.
-                ref_indices = (
-                    reaction["reactants"]
-                    if reaction["reactants"]
-                    else reaction["products"]
-                )
-                cpt_size = None
-                for sp_idx in ref_indices:
-                    sp = self.model.species[sp_idx]
-                    mon_cpts = [
-                        mp.compartment
-                        for mp in sp.monomer_patterns
-                        if mp.compartment is not None
-                    ]
-                    if mon_cpts:
-                        cpt = mon_cpts[0]
-                        if cpt.size is not None:
-                            cpt_size = Symbol(cpt.size.name)
-                        break
-                if cpt_size is not None:
-                    # J = V^n * BNG_rate converts concentration-based BNG
-                    # rates to the amount/time flux expected by SBML.
-                    kinetic_rate = cpt_size**n_reac * bng_rate
-                else:
-                    kinetic_rate = bng_rate
-            else:
-                kinetic_rate = bng_rate
-
             rate = rxn.createKineticLaw()
             _check(rate)
-            rate_mathml = self._sympy_to_sbmlast(kinetic_rate)
+            rate_mathml = self._sympy_to_sbmlast(reaction["rate"])
             _check(rate.setMath(rate_mathml))
 
         # Observables

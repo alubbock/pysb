@@ -358,46 +358,94 @@ def test_energy_model_raises():
     assert_raises(EnergyNotSupported, _sbml_string, model)
 
 
-@with_model
-def test_catalyst_reaction_kinetic_law_volume_exponent():
-    """Catalyst reaction B+B->C+B in a non-unit compartment: kinetic law must
-    use V^1 (net-consumed = 1), not V^2 (raw reactant count = 2).
+try:
+    import roadrunner
 
-    For Robertson's second reaction (B+B->C+B, BNG rate = k*[B]^2), the
-    SBML kinetic law J = V^n_net * k*[B]^2 where n_net = 1 (one B is
-    consumed net).  Previously the exporter used len(reactants)=2, writing
-    V^2*k*[B]^2 which inflated J by V and broke round-trip accuracy for
-    non-unit compartments.
+    HAS_ROADRUNNER = True
+except ImportError:
+    HAS_ROADRUNNER = False
+
+
+def _assert_roadrunner_matches_pysb(pysb_model, tmax=10.0, n_points=51, rtol=1e-4):
+    """Simulate the exported SBML with RoadRunner and compare species amounts
+    to PySB's own ODE simulation of the original model."""
+    import numpy as np
+    from pysb.simulator import ScipyOdeSimulator
+
+    if not HAS_ROADRUNNER:
+        raise SkipTest("roadrunner (libroadrunner) not installed")
+
+    tspan = np.linspace(0, tmax, n_points)
+    expected = (
+        ScipyOdeSimulator(pysb_model, tspan=tspan, compiler="python").run().species
+    )
+    species_ids = ["__s{}".format(i) for i in range(len(pysb_model.species))]
+    rr = roadrunner.RoadRunner(_sbml_string(pysb_model))
+    rr.integrator.relative_tolerance = 1e-10
+    rr.integrator.absolute_tolerance = 1e-14
+    result = rr.simulate(0, tmax, n_points, selections=["time"] + species_ids)
+    for i, sp_id in enumerate(species_ids):
+        scale = max(abs(expected[:, i]).max(), 1e-30)
+        error = abs(result[sp_id] - expected[:, i]).max() / scale
+        assert error < rtol, "{}: relative error {:.2e}".format(sp_id, error)
+
+
+@with_model
+def test_nonunit_compartment_matches_pysb_odes():
+    """The export reproduces PySB's own ODEs for a compartment of size != 1.
+
+    BNG's species values are amounts and its rates already include the cBNGL
+    volume scaling, so they are exported verbatim.
     """
     from pysb import Compartment
-    from pysb.bng import generate_equations
+
+    Compartment("cell", dimension=3, size=Parameter("Vcell", 2.0))
+    Monomer("A")
+    Monomer("B")
+    Monomer("C")
+    Parameter("kf", 0.3)
+    Parameter("kr", 0.2)
+    Parameter("ksyn", 0.5)
+    Initial(A() ** cell, Parameter("A0", 1.0))
+    Initial(B() ** cell, Parameter("B0", 2.0))
+    Rule("bind", A() ** cell + B() ** cell >> C() ** cell, kf)
+    Rule("unbind", C() ** cell >> A() ** cell + B() ** cell, kr)
+    Rule("syn", None >> A() ** cell, ksyn)
+
+    _assert_roadrunner_matches_pysb(model)
+
+    # Amounts, not concentrations: kinetic laws are in substance units
+    smodel = _get_sbml_model(model)
+    assert all(
+        smodel.getSpecies(i).getHasOnlySubstanceUnits()
+        for i in range(smodel.getNumSpecies())
+    )
+
+
+@with_model
+def test_catalyst_reaction_nonunit_compartment_matches_pysb_odes():
+    """Catalyst reaction B+B->C+B (BNG rate 0.5*k*[B]^2 at V=2) is exported
+    without any extra volume factor."""
+    from pysb import Compartment
 
     Compartment("cell", dimension=3, size=Parameter("Vcell", 2.0))
     Monomer("B")
     Monomer("C")
-    Parameter("k2", 3e7)
-    Initial(B() ** cell, Parameter("B_0", 1e-3))
+    Parameter("k2", 0.7)
+    Initial(B() ** cell, Parameter("B_0", 1.0))
     Initial(C() ** cell, Parameter("C_0", 0.0))
     Rule("BB_to_BC", B() ** cell + B() ** cell >> C() ** cell + B() ** cell, k2)
-    Observable("obs_B", B() ** cell)
-    generate_equations(model)
 
-    sbml_model = _get_sbml_model(model)
-    # Find the reaction in the exported SBML
-    assert sbml_model.getNumReactions() == 1
-    rxn = sbml_model.getReaction(0)
-    math_str = libsbml.formulaToL3String(rxn.getKineticLaw().getMath())
+    _assert_roadrunner_matches_pysb(model)
 
-    # The kinetic law must contain Vcell^1 (i.e. "Vcell" appears exactly once
-    # as a factor), not Vcell^2.  We check that the string does NOT contain
-    # "Vcell^2" or "Vcell * Vcell".
-    assert "Vcell^2" not in math_str, (
-        "Kinetic law should use V^1 for catalyst reaction, got: {}".format(math_str)
-    )
-    assert "Vcell * Vcell" not in math_str, (
-        "Kinetic law should use V^1 for catalyst reaction, got: {}".format(math_str)
-    )
-    # And Vcell must appear at least once (volume correction is applied)
-    assert "Vcell" in math_str, (
-        "Kinetic law must include compartment volume, got: {}".format(math_str)
-    )
+
+def test_move_connected_unequal_volumes_matches_pysb_odes():
+    """Reactions spanning a 2D membrane and a 3D volume of different sizes"""
+    import copy
+    from pysb.examples import move_connected
+
+    model = copy.deepcopy(move_connected.model)
+    model.parameters["Vmain"].value = 3.0
+    model.parameters["Vx"].value = 0.5
+    model.parameters["Vy"].value = 0.25
+    _assert_roadrunner_matches_pysb(model, tmax=5.0)
