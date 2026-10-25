@@ -96,6 +96,11 @@ def _minimal_sbml(
     ).format(lv=level, vn=version, body="\n    ".join(blocks))
 
 
+def _rate_value(model, rule_name):
+    """Numeric value of a rule's forward rate (a constant expression)"""
+    return model.rules[rule_name].rate_forward.get_value()
+
+
 # ---------------------------------------------------------------------------
 # _sanitize_id
 # ---------------------------------------------------------------------------
@@ -187,32 +192,29 @@ class TestFlatSbml:
         assert self.model.parameters["k3_r"] in dim_r.expr.free_symbols
 
     def test_r1_rate_expression(self):
-        """R1 rate (k1_f*S1*S2 divided by obs_S1*obs_S2) simplifies to k1_f.
+        """R1 rate (k1_f*S1*S2 in concentrations) is k1_f / cell_size.
 
-        Because the simplified rate is a bare Parameter, no wrapping Expression
-        is created; the rule's rate_forward is the Parameter itself.
+        The law is divided by obs_S1*obs_S2, and BNG's own bimolecular
+        1/cell_size scaling is compensated, leaving k1_f / cell_size from
+        converting the concentrations of S1 and S2 to amounts.
         """
         r1 = self.model.rules["R1"]
-        # After dividing (k1_f*S1*S2) by (obs_S1*obs_S2) the rate is k1_f:
-        # a bare Parameter, so no R1_rate Expression is created.
-        assert r1.rate_forward is self.model.parameters["k1_f"]
-        assert "R1_rate" not in self.model.expressions.keys()
+        k1_f = self.model.parameters["k1_f"]
+        size = self.model.parameters["cell_size"]
+        assert sympy.simplify(r1.rate_forward.expr - k1_f / size) == 0
 
     def test_r5_rate_homodimer(self):
         """R5 homodimerisation: SBML kinetic law is ``0.5 * k3_f * S1^2``.
 
         The importer divides by ``obs_S1^2`` to get the intrinsic rate, then
         multiplies by the combinatorial correction ``2! = 2`` to compensate for
-        PySB's symmetry-factor halving.  Net result: ``0.5 * k3_f * 2 = k3_f``,
-        stored as the expression ``1.0 * k3_f``.
+        PySB's symmetry-factor halving.  Net result: ``0.5 * k3_f * 2 =
+        k3_f`` (per cell_size, from converting S1 to an amount).
         """
         r5_rate = self.model.expressions["R5_rate"]
-        # After the combinatorial correction the only free symbol is k3_f;
-        # no 0.5 factor should remain.
-        assert self.model.parameters["k3_f"] in r5_rate.expr.free_symbols
-        nums = r5_rate.expr.atoms(sympy.Number)
-        # The sole numeric coefficient must be 1 (stored as Float 1.0)
-        assert all(abs(float(n) - 1.0) < 1e-9 for n in nums)
+        k3_f = self.model.parameters["k3_f"]
+        size = self.model.parameters["cell_size"]
+        assert sympy.simplify(r5_rate.expr - k3_f / size) == 0
 
     def test_rule_reactants_products(self):
         """R1: S1 + S2 -> S3."""
@@ -407,11 +409,11 @@ def test_roundtrip_initial_values():
 
 def test_roundtrip_nonunit_compartment_trajectories():
     """Export/import round-trip with a non-unit compartment must reproduce
-    the same ODE trajectories to within rtol=1e-3.
+    the same ODE trajectories.
 
-    This is a regression test for a bug where the exporter wrote BNG's
-    concentration-based rates directly as SBML kinetic laws, causing the
-    importer to double-count the volume factor for non-unit compartments.
+    The exporter and importer are each checked against an independent
+    reference (RoadRunner and PySB's own ODEs respectively) in their own
+    tests, so errors in the two cannot cancel out here.
     """
     import numpy as np
     import pysb.core
@@ -427,9 +429,6 @@ def test_roundtrip_nonunit_compartment_trajectories():
     from pysb.export import export
     from pysb.simulator import ScipyOdeSimulator
 
-    # Build a model with compartment size V=2 (non-unit) so the volume
-    # correction factor is 0.5 for bimolecular and 2 for synthesis.
-    # Parameters are chosen to give well-conditioned dynamics over t=[0, 10].
     pysb.core.SelfExporter.cleanup()
     m_orig = Model()
     Compartment("cell", dimension=3, size=Parameter("Vcell", 2.0))
@@ -438,6 +437,7 @@ def test_roundtrip_nonunit_compartment_trajectories():
     Monomer("C")
     Parameter("kf", 0.1)
     Parameter("kr", 0.5)
+    Parameter("ksyn", 0.2)
     Initial(A() ** cell, Parameter("A0", 1.0))
     Initial(B() ** cell, Parameter("B0", 2.0))
     Initial(C() ** cell, Parameter("C0", 0))
@@ -446,6 +446,7 @@ def test_roundtrip_nonunit_compartment_trajectories():
     Observable("obs_C", C() ** cell)
     Rule("bind", A() ** cell + B() ** cell >> C() ** cell, kf)
     Rule("unbind", C() ** cell >> A() ** cell + B() ** cell, kr)
+    Rule("syn", None >> A() ** cell, ksyn)
 
     try:
         t = np.linspace(0, 10, 51)
@@ -466,7 +467,7 @@ def test_roundtrip_nonunit_compartment_trajectories():
             rt_vals = traj_rt[rt_col].values
             scale = np.abs(orig_vals).max() + 1e-30
             rel_err = np.max(np.abs(orig_vals - rt_vals)) / scale
-            assert rel_err < 1e-3, (
+            assert rel_err < 1e-5, (
                 "Round-trip trajectory mismatch for {}: max rel error {:.2e}".format(
                     orig_col, rel_err
                 )
@@ -539,7 +540,9 @@ def test_stoichiometry_attribute():
             </listOfProducts>
             <kineticLaw>
               <math xmlns="http://www.w3.org/1998/Math/MathML">
-                <apply><times/><ci>k</ci><ci>A</ci></apply>
+                <apply><times/><ci>k</ci>
+                  <apply><power/><ci>A</ci><cn>2</cn></apply>
+                </apply>
               </math>
             </kineticLaw>
           </reaction>""",
@@ -680,14 +683,18 @@ def test_event_warns_with_force():
 # ---------------------------------------------------------------------------
 
 
-def test_non_integer_stoichiometry_warns():
-    """Non-integer stoichiometry issues a warning and is truncated."""
+def test_non_integer_stoichiometry_exact():
+    """Non-integer stoichiometry cannot be a rule pattern: the reaction is
+    encoded as signed synthesis rules that keep the exact stoichiometry."""
+    import numpy as np
+    from pysb.simulator import ScipyOdeSimulator
+
     sbml = _minimal_sbml(
         species=(
             '<species id="A" compartment="c" initialAmount="10"/>'
             '<species id="B" compartment="c" initialAmount="0"/>'
         ),
-        parameters='<parameter id="k" value="1" constant="true"/>',
+        parameters='<parameter id="k" value="0.2" constant="true"/>',
         reactions="""
           <reaction id="r1" reversible="false">
             <listOfReactants>
@@ -703,15 +710,18 @@ def test_non_integer_stoichiometry_warns():
             </kineticLaw>
           </reaction>""",
     )
-    import warnings as _warnings
+    m = _model_from_sbml_libsbml(sbml)
+    assert "r1" not in m.rules.keys()
+    assert {"r1_A", "r1_B"} <= set(m.rules.keys())
 
-    with _warnings.catch_warnings(record=True) as w:
-        _warnings.simplefilter("always")
-        m = _model_from_sbml_libsbml(sbml)
-    assert any("stoichiometry" in str(warning.message).lower() for warning in w)
-    # 1.5 truncated to 1 → one reactant pattern copy
-    r = m.rules["r1"]
-    assert len(r.rule_expression.reactant_pattern.complex_patterns) == 1
+    # dA/dt = -1.5 k A/V, dB/dt = k A/V with V = 1
+    t = np.linspace(0, 5, 50)
+    res = ScipyOdeSimulator(m, tspan=t, compiler="python").run()
+    a_ref = 10 * np.exp(-1.5 * 0.2 * t)
+    np.testing.assert_allclose(res.observables["obs_A"], a_ref, rtol=1e-4)
+    np.testing.assert_allclose(
+        res.observables["obs_B"], (10 - a_ref) / 1.5, rtol=1e-4, atol=1e-9
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1211,21 +1221,22 @@ def test_reversible_reaction_split_into_two_rules():
     # Both rules are non-reversible
     assert m.rules["r1_fwd"].rule_expression.is_reversible is False
     assert m.rules["r1_rev"].rule_expression.is_reversible is False
-    # Forward rate = kf (kinetic law kf*A divided by obs_A → bare Parameter)
-    assert m.rules["r1_fwd"].rate_forward is m.parameters["kf"]
-    assert "r1_fwd_rate" not in m.expressions.keys()
-    # Reverse rate = kr (kinetic law kr*B divided by obs_B → bare Parameter)
-    assert m.rules["r1_rev"].rate_forward is m.parameters["kr"]
-    assert "r1_rev_rate" not in m.expressions.keys()
+    # Forward rate = kf (c_size = 1); reverse rate = kr
+    assert abs(_rate_value(m, "r1_fwd") - 1.0) < 1e-12
+    assert abs(_rate_value(m, "r1_rev") - 0.5) < 1e-12
 
 
-def test_reversible_reaction_unseparable_warns():
-    """A reversible reaction with unseparable kinetic law warns and creates one rule.
+def test_reversible_reaction_unseparable_signed_rules():
+    """A reversible reaction with unseparable kinetic law is exact.
 
     When ``_split_reversible_rate`` cannot decompose the kinetic law (e.g.
-    all terms have the same sign, or there is only one term), a warning is
-    issued and only the forward rule is created.
+    all terms have the same sign, or there is only one term), the reaction is
+    encoded as one signed synthesis rule per species instead of dropping the
+    reverse direction.
     """
+    import numpy as np
+    from pysb.simulator import ScipyOdeSimulator
+
     sbml = _minimal_sbml(
         species=(
             '<species id="A" compartment="c" initialAmount="1"/>'
@@ -1247,17 +1258,11 @@ def test_reversible_reaction_unseparable_warns():
             </kineticLaw>
           </reaction>""",
     )
-    import warnings as _warnings
-
-    with _warnings.catch_warnings(record=True) as w:
-        _warnings.simplefilter("always")
-        m = _model_from_sbml_libsbml(sbml)
-    # Warning about unseparable kinetic law
-    assert any("cannot be split" in str(warning.message) for warning in w)
-    # Only the forward rule is created
-    assert "r1_fwd" in m.rules.keys()
-    assert "r1_rev" not in m.rules.keys()
-    assert m.rules["r1_fwd"].rule_expression.is_reversible is False
+    m = _model_from_sbml_libsbml(sbml)
+    assert {"r1_A", "r1_B"} == set(m.rules.keys())
+    t = np.linspace(0, 3, 20)
+    res = ScipyOdeSimulator(m, tspan=t, compiler="python").run()
+    np.testing.assert_allclose(res.observables["obs_A"], np.exp(-t), rtol=1e-4)
 
 
 def test_duplicate_rate_rule_raises():
@@ -1300,17 +1305,59 @@ def test_duplicate_rate_rule_warns_with_force():
 
 
 def test_compartment_hierarchy():
-    """Nested compartments (outer/inner) are linked via the parent attribute."""
+    """A 2D membrane inside a 3D volume is linked via the parent attribute."""
+    sbml = _minimal_sbml(
+        compartments=(
+            '<compartment id="outer" size="10"/>'
+            '<compartment id="membrane" spatialDimensions="2" size="1"'
+            ' outside="outer"/>'
+        ),
+    )
+    m = _model_from_sbml_libsbml(sbml, force=True)
+    assert m.compartments["membrane"].parent is m.compartments["outer"]
+
+
+def test_compartment_hierarchy_independent_of_document_order():
+    sbml = _minimal_sbml(
+        compartments=(
+            '<compartment id="membrane" spatialDimensions="2" size="1"'
+            ' outside="outer"/>'
+            '<compartment id="outer" size="10"/>'
+        ),
+    )
+    m = _model_from_sbml_libsbml(sbml, force=True)
+    assert m.compartments["membrane"].parent is m.compartments["outer"]
+
+
+def test_compartment_same_dimension_outside_not_nested():
+    """Level 2 'outside' between two volumes must not become a PySB parent:
+    BioNetGen aborts for nested compartments of equal dimension."""
     sbml = _minimal_sbml(
         compartments=(
             '<compartment id="outer" size="10"/>'
             '<compartment id="inner" size="1" outside="outer"/>'
         ),
+        species=(
+            '<species id="A" compartment="inner" initialConcentration="1"/>'
+            '<species id="B" compartment="outer" initialConcentration="0"/>'
+        ),
+        parameters='<parameter id="k" value="0.1" constant="true"/>',
+        reactions="""
+          <reaction id="r1" reversible="false">
+            <listOfReactants><speciesReference species="A"/></listOfReactants>
+            <listOfProducts><speciesReference species="B"/></listOfProducts>
+            <kineticLaw>
+              <math xmlns="http://www.w3.org/1998/Math/MathML">
+                <apply><times/><ci>k</ci><ci>A</ci></apply>
+              </math>
+            </kineticLaw>
+          </reaction>""",
     )
     m = _model_from_sbml_libsbml(sbml, force=True)
-    inner = m.compartments["inner"]
-    outer = m.compartments["outer"]
-    assert inner.parent is outer
+    assert m.compartments["inner"].parent is None
+    from pysb.bng import generate_equations
+
+    generate_equations(m)  # must not abort in BioNetGen
 
 
 def test_integer_stoichiometry_float_representation():
@@ -1333,7 +1380,9 @@ def test_integer_stoichiometry_float_representation():
             </listOfProducts>
             <kineticLaw>
               <math xmlns="http://www.w3.org/1998/Math/MathML">
-                <apply><times/><ci>k</ci><ci>A</ci></apply>
+                <apply><times/><ci>k</ci>
+                  <apply><power/><ci>A</ci><cn>2</cn></apply>
+                </apply>
               </math>
             </kineticLaw>
           </reaction>""",
@@ -1381,25 +1430,44 @@ def test_rate_rule_for_existing_species():
     assert "A" in m.monomers.keys()
 
 
-def test_assignment_rule_skips_existing_component():
-    """An assignment rule targeting a name that already exists as a model
-    component (e.g. an observable) is silently skipped."""
-    # The species 'A' creates obs_A; an assignment rule for 'obs_A' should
-    # be ignored because that name already exists as a model component.
+def test_generated_names_do_not_collide_with_sbml_ids():
+    """SBML ids that look like importer-generated names keep their names; the
+    generated components are renamed."""
     sbml = _minimal_sbml(
         species='<species id="A" compartment="c" initialAmount="1"/>',
-        parameters='<parameter id="obs_A" constant="false" value="0"/>',
+        parameters=(
+            '<parameter id="obs_A" constant="false" value="0"/>'
+            '<parameter id="A_0" constant="true" value="2"/>'
+            '<parameter id="c_size" constant="true" value="3"/>'
+            '<parameter id="r1_rate" constant="true" value="4"/>'
+        ),
         rules="""
           <assignmentRule variable="obs_A">
             <math xmlns="http://www.w3.org/1998/Math/MathML">
               <ci>A</ci>
             </math>
           </assignmentRule>""",
+        reactions="""
+          <reaction id="r1" reversible="false">
+            <listOfReactants><speciesReference species="A"/></listOfReactants>
+            <kineticLaw>
+              <math xmlns="http://www.w3.org/1998/Math/MathML">
+                <apply><times/><ci>A_0</ci><ci>c_size</ci><ci>r1_rate</ci>
+                  <ci>A</ci></apply>
+              </math>
+            </kineticLaw>
+          </reaction>""",
     )
-    m = _model_from_sbml_libsbml(sbml, force=True)
-    # obs_A is already an Observable from the species; the assignment rule
-    # for 'obs_A' parameter should not overwrite it.
-    assert "obs_A" in m.observables.keys()
+    m = _model_from_sbml_libsbml(sbml)
+    assert m.parameters["A_0"].value == 2
+    assert m.parameters["c_size"].value == 3
+    assert m.parameters["r1_rate"].value == 4
+    assert "obs_A" in m.expressions.keys()
+    assert "obs_A" not in m.observables.keys()
+    assert len(m.observables) == 1
+    assert m.parameters["A_0_"].value == 1  # initial amount of A
+    assert m.compartments["c"].size is m.parameters["c_size_"]
+    assert m.parameters["c_size_"].value == 1
 
 
 def test_split_reversible_rate_zero_coeff():
@@ -1477,10 +1545,10 @@ def test_function_definition_used_in_rate_law():
     </listOfFunctionDefinitions>""",
     )
     m = _model_from_sbml_libsbml(sbml)
-    # myfunc(k, A) = k*A; after dividing by obs_A (reactant) the rate = k
-    # (bare Parameter), so no r1_rate Expression is created.
-    assert m.rules["r1"].rate_forward is m.parameters["k"]
-    assert "r1_rate" not in m.expressions.keys()
+    # myfunc(k, A) = k*A (A a concentration); the rule rate is k / c_size
+    k = m.parameters["k"]
+    size = m.parameters["c_size"]
+    assert sympy.simplify(m.rules["r1"].rate_forward.expr - k / size) == 0
 
 
 def test_initial_assignment_numeric_updates_ic():
@@ -1574,8 +1642,9 @@ def test_local_kinetic_law_parameter_promoted():
     assert "r1" in m.rules.keys()
 
 
-def test_local_kinetic_law_parameter_shadow_warns():
-    """A local kinetic-law parameter that shadows a global one issues a warning."""
+def test_local_kinetic_law_parameter_shadows_global():
+    """A local kinetic-law parameter takes precedence over a global of the same
+    id: it is renamed rather than replaced by the global."""
     sbml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<sbml xmlns="http://www.sbml.org/sbml/level2/version3"'
@@ -1614,15 +1683,42 @@ def test_local_kinetic_law_parameter_shadow_warns():
         "  </model>\n"
         "</sbml>"
     )
-    import warnings as _warnings
+    m = _model_from_sbml_libsbml(sbml)
+    assert m.parameters["k_local"].value == 1.0
+    assert m.parameters["r1_k_local"].value == 0.5
+    rate = m.rules["r1"].rate_forward
+    assert m.parameters["r1_k_local"] in rate.expr.free_symbols
+    assert m.parameters["k_local"] not in rate.expr.free_symbols
 
-    with _warnings.catch_warnings(record=True) as w:
-        _warnings.simplefilter("always")
-        m = _model_from_sbml_libsbml(sbml)
-    assert any("shadow" in str(warning.message).lower() for warning in w), (
-        "Expected a shadowing warning for local parameter k_local"
+
+def test_local_kinetic_law_parameters_same_id_in_two_reactions():
+    """Each reaction keeps its own value of a local parameter with a shared id."""
+    import numpy as np
+    from pysb.simulator import ScipyOdeSimulator
+
+    reaction = """
+      <reaction id="{rid}" reversible="false">
+        <listOfReactants><speciesReference species="{sp}"/></listOfReactants>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply><times/><ci>k</ci><ci>{sp}</ci></apply>
+          </math>
+          <listOfParameters><parameter id="k" value="{k}"/></listOfParameters>
+        </kineticLaw>
+      </reaction>"""
+    sbml = _minimal_sbml(
+        species=(
+            '<species id="A" compartment="c" initialAmount="1"/>'
+            '<species id="B" compartment="c" initialAmount="1"/>'
+        ),
+        reactions=reaction.format(rid="r1", sp="A", k=0.1)
+        + reaction.format(rid="r2", sp="B", k=2.0),
     )
-    assert "r1" in m.rules.keys()
+    m = _model_from_sbml_libsbml(sbml)
+    t = np.linspace(0, 2, 20)
+    res = ScipyOdeSimulator(m, tspan=t, compiler="python").run()
+    np.testing.assert_allclose(res.observables["obs_A"], np.exp(-0.1 * t), rtol=1e-4)
+    np.testing.assert_allclose(res.observables["obs_B"], np.exp(-2.0 * t), rtol=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -1843,27 +1939,17 @@ def _cross_compartment_sbml(
 
 
 def test_cross_compartment_irreversible_structure():
-    """Cross-compartment irreversible transport creates deg + prod split rules."""
+    """Cross-compartment transport is encoded as signed synthesis rules.
+
+    BioNetGen only accepts rules that move species between adjacent
+    compartments, which flat SBML models do not declare, so each species gets
+    its own synthesis rule with a signed rate.
+    """
     sbml = _cross_compartment_sbml(V_src=2.0, V_dst=5.0, k=0.3, A0=1.0)
     m = _model_from_sbml_libsbml(sbml)
-    rule_names = set(m.rules.keys())
-    # Must have deg (A -> None) and prod (None -> B) rules; original r1 absent
-    assert "r1_deg" in rule_names, "Expected r1_deg rule"
-    assert "r1_prod" in rule_names, "Expected r1_prod rule"
-    assert "r1" not in rule_names, "Original r1 rule should not exist"
-    # r1_deg reactants contain A; r1_prod products contain B
-    deg_reactants = [
-        mp.monomer.name
-        for cp in m.rules["r1_deg"].rule_expression.reactant_pattern.complex_patterns
-        for mp in cp.monomer_patterns
-    ]
-    assert "A" in deg_reactants
-    prod_products = [
-        mp.monomer.name
-        for cp in m.rules["r1_prod"].rule_expression.product_pattern.complex_patterns
-        for mp in cp.monomer_patterns
-    ]
-    assert "B" in prod_products
+    assert set(m.rules.keys()) == {"r1_A", "r1_B"}
+    for rule in m.rules:
+        assert not rule.rule_expression.reactant_pattern.complex_patterns
 
 
 def test_cross_compartment_irreversible_simulation():
@@ -1887,8 +1973,9 @@ def test_cross_compartment_irreversible_simulation():
     tspan = np.linspace(0, 5, 100)
     res = ScipyOdeSimulator(m, tspan=tspan, compiler="python").run()
 
-    A_sim = res.observables["obs_A"]
-    B_sim = res.observables["obs_B"]
+    # Observables are amounts: concentration times compartment size
+    A_sim = res.observables["obs_A"] / V_src
+    B_sim = res.observables["obs_B"] / V_dst
     A_ref = A0 * np.exp(-k * tspan)
     B_ref = (V_src / V_dst) * (1.0 - np.exp(-k * tspan))
 
@@ -1897,18 +1984,12 @@ def test_cross_compartment_irreversible_simulation():
 
 
 def test_cross_compartment_reversible_structure():
-    """Cross-compartment reversible transport creates four split rules."""
+    """Cross-compartment reversible transport is encoded as signed rules."""
     sbml = _cross_compartment_sbml(
         V_src=2.0, V_dst=5.0, k=0.3, kr=0.1, A0=1.0, B0=0.5, reversible=True
     )
     m = _model_from_sbml_libsbml(sbml)
-    rule_names = set(m.rules.keys())
-    expected = {"r1_fwd_deg", "r1_fwd_prod", "r1_rev_deg", "r1_rev_prod"}
-    for name in expected:
-        assert name in rule_names, "Expected rule {} missing".format(name)
-    assert "r1" not in rule_names
-    assert "r1_fwd" not in rule_names
-    assert "r1_rev" not in rule_names
+    assert set(m.rules.keys()) == {"r1_A", "r1_B"}
 
 
 def test_cross_compartment_reversible_simulation():
@@ -1945,10 +2026,10 @@ def test_cross_compartment_reversible_simulation():
     B_ref = ref.y[1]
 
     np.testing.assert_allclose(
-        res.observables["obs_A"], A_ref, rtol=1e-3, err_msg="[A] mismatch"
+        res.observables["obs_A"] / V_src, A_ref, rtol=1e-3, err_msg="[A] mismatch"
     )
     np.testing.assert_allclose(
-        res.observables["obs_B"], B_ref, rtol=1e-3, err_msg="[B] mismatch"
+        res.observables["obs_B"] / V_dst, B_ref, rtol=1e-3, err_msg="[B] mismatch"
     )
 
 
@@ -2046,17 +2127,8 @@ def test_homodimer_combinatorial_correction_value():
     )
     m = _model_from_sbml_libsbml(sbml)
     # After dividing by obs_A^2 and multiplying by 2!, kinetic law k*A^2 /
-    # (A^2) * 2 = 2k = 1.0.  Rate should be stored as a bare Parameter with
-    # value 1.0, or as an Expression with no sub-1 numeric coefficients.
-    rate = m.rules["r1"].rate_forward
-    if hasattr(rate, "expr"):
-        nums = rate.expr.atoms(sympy.Number)
-        assert all(float(n) >= 1.0 for n in nums if float(n) != 0), (
-            "Unexpected sub-1 coefficient in rate: {}".format(rate.expr)
-        )
-    else:
-        # Bare Parameter: value must be 2*k = 1.0
-        assert abs(float(rate.value) - 2.0 * k) < 1e-9
+    # (A^2) * 2 = 2k = 1.0 (unit compartment).
+    assert abs(_rate_value(m, "r1") - 2.0 * k) < 1e-9
 
 
 def test_product_stoichiometry_two():
@@ -2166,17 +2238,8 @@ def test_trimerisation_combinatorial_correction():
           </reaction>""",
     )
     m = _model_from_sbml_libsbml(sbml)
-    # Intrinsic rate = 6! * k * A^3 / A^3 / V = 6k.
-    # Stored as bare Parameter (value 6.0) or Expression with coefficient 6.
-    rate = m.rules["r1"].rate_forward
-    if hasattr(rate, "expr"):
-        # Extract leading numeric coefficient
-        coeff = float(rate.expr.as_coeff_Mul()[0])
-        assert abs(coeff - 6.0) < 1e-9, "Expected coeff 6, got {}".format(coeff)
-    else:
-        assert abs(float(rate.value) - 6.0) < 1e-9, "Expected value 6.0, got {}".format(
-            rate.value
-        )
+    # Intrinsic rate = 3! * k * A^3 / A^3 / V^2 * V^2 = 6k (unit compartment).
+    assert abs(_rate_value(m, "r1") - 6.0) < 1e-9
 
 
 def test_reversible_homodimer_combinatorial_correction():
@@ -2226,26 +2289,10 @@ def test_reversible_homodimer_combinatorial_correction():
     assert "r1_fwd" in m.rules.keys(), "Expected r1_fwd rule"
     assert "r1_rev" in m.rules.keys(), "Expected r1_rev rule"
 
-    # Forward rate: 2*kf*A^2 / A^2 = 2*kf → coefficient on kf must be 2
-    fwd_rate = m.rules["r1_fwd"].rate_forward
-    if hasattr(fwd_rate, "expr"):
-        fwd_coeff = float(fwd_rate.expr.as_coeff_Mul()[0])
-    else:
-        fwd_coeff = float(fwd_rate.value) / kf
-    assert abs(fwd_coeff - 2.0) < 1e-9, "Forward coeff should be 2, got {}".format(
-        fwd_coeff
-    )
-
-    # Reverse rate: 1*kr*D / D = kr → simplifies to bare Parameter kr
-    rev_rate = m.rules["r1_rev"].rate_forward
-    if hasattr(rev_rate, "expr"):
-        free = rev_rate.expr.free_symbols
-        assert m.parameters["kr"] in free, "kr should appear in reverse rate"
-        nums = rev_rate.expr.atoms(sympy.Number)
-        # No coefficient other than 1 (or 1.0)
-        assert all(abs(float(n) - 1.0) < 1e-9 for n in nums if float(n) != 0)
-    else:
-        assert abs(float(rev_rate.value) - kr) < 1e-9
+    # Forward rate: 2*kf*A^2 / A^2 = 2*kf
+    assert abs(_rate_value(m, "r1_fwd") - 2.0 * kf) < 1e-9
+    # Reverse rate: kr*D / D = kr
+    assert abs(_rate_value(m, "r1_rev") - kr) < 1e-9
 
 
 def test_catalyst_combinatorial_correction_value():
@@ -2286,14 +2333,10 @@ def test_catalyst_combinatorial_correction_value():
     )
     m = _model_from_sbml_libsbml(sbml)
     rate = m.rules["r1"].rate_forward
-    # Net-consumed B = 2 - 1 = 1, so correction = 1! = 1.
-    # The recovered rule rate must equal k (not 2*k).
-    if hasattr(rate, "expr"):
-        coeff = float(rate.expr.as_coeff_Mul()[0])
-    else:
-        coeff = float(rate.value)
-    assert abs(coeff - k) < 1.0, (
-        "Catalyst rate coefficient should be k={}, got {}".format(k, coeff)
+    # One copy of B is kept and one consumed, so the correction is
+    # 1! * 1! = 1: the recovered rule rate must equal k (not 2*k).
+    assert abs(float(rate.get_value()) - k) < 1.0, (
+        "Catalyst rate should be k={}, got {}".format(k, rate.get_value())
     )
 
 
@@ -2534,3 +2577,687 @@ def test_libsbml_matches_roadrunner_flat_sbml():
                 sp_id, rel_err, rtol
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Independent reference: libRoadRunner
+#
+# These tests build small SBML Level 3 models and compare the PySB trajectories
+# of the imported model to RoadRunner's, covering the cases where PySB's amount
+# based species values, BNG's compartment-size scaling and BNG's symmetry
+# factors have to be compensated for by the importer.
+# ---------------------------------------------------------------------------
+
+_MATHML = 'xmlns="http://www.w3.org/1998/Math/MathML"'
+
+
+def _l3_sbml(
+    compartments,
+    species="",
+    parameters="",
+    rules="",
+    reactions="",
+    assignments="",
+    functions="",
+    version=1,
+):
+    def block(tag, body):
+        return "<listOf{0}>{1}</listOf{0}>".format(tag, body) if body else ""
+
+    if version == 1:
+        reactions = reactions.replace("<reaction ", '<reaction fast="false" ')
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sbml xmlns="http://www.sbml.org/sbml/level3/version{v}/core"'
+        ' level="3" version="{v}"><model id="m" substanceUnits="mole"'
+        ' timeUnits="second" extentUnits="mole">{body}</model></sbml>'
+    ).format(
+        v=version,
+        body="".join(
+            [
+                block("FunctionDefinitions", functions),
+                block("Compartments", compartments),
+                block("Species", species),
+                block("Parameters", parameters),
+                block("InitialAssignments", assignments),
+                block("Rules", rules),
+                block("Reactions", reactions),
+            ]
+        ),
+    )
+
+
+def _cpt(cpt_id, size=1, dim=3):
+    return (
+        '<compartment id="{}" spatialDimensions="{}" size="{}" constant="true"/>'
+    ).format(cpt_id, dim, size)
+
+
+def _sp(sp_id, cpt, amount=None, conc=None, hosu=False, boundary=False):
+    init = ""
+    if amount is not None:
+        init += ' initialAmount="{}"'.format(amount)
+    if conc is not None:
+        init += ' initialConcentration="{}"'.format(conc)
+    return (
+        '<species id="{}" compartment="{}"{} hasOnlySubstanceUnits="{}"'
+        ' boundaryCondition="{}" constant="false"/>'
+    ).format(sp_id, cpt, init, str(hosu).lower(), str(boundary).lower())
+
+
+def _par(par_id, value=None, constant=True):
+    attr = ' value="{}"'.format(value) if value is not None else ""
+    return '<parameter id="{}"{} constant="{}"/>'.format(
+        par_id, attr, str(constant).lower()
+    )
+
+
+def _ci(name):
+    return "<ci>{}</ci>".format(name)
+
+
+def _cn(value):
+    return "<cn>{}</cn>".format(value)
+
+
+def _apply(op, *args):
+    return "<apply><{}/>{}</apply>".format(op, "".join(args))
+
+
+def _times(*args):
+    return _apply("times", *args)
+
+
+def _pow(base, exponent):
+    return _apply("power", _ci(base), _cn(exponent))
+
+
+def _reaction(rxn_id, reactants, products, law, reversible=False, local=""):
+    def refs(stoichiometries):
+        return "".join(
+            '<speciesReference species="{}" stoichiometry="{}" constant="true"/>'.format(
+                sp_id, n
+            )
+            for sp_id, n in stoichiometries.items()
+        )
+
+    return (
+        '<reaction id="{}" reversible="{}">{}{}<kineticLaw><math {}>{}</math>{}'
+        "</kineticLaw></reaction>"
+    ).format(
+        rxn_id,
+        str(reversible).lower(),
+        "<listOfReactants>{}</listOfReactants>".format(refs(reactants))
+        if reactants
+        else "",
+        "<listOfProducts>{}</listOfProducts>".format(refs(products))
+        if products
+        else "",
+        _MATHML,
+        law,
+        "<listOfLocalParameters>{}</listOfLocalParameters>".format(local)
+        if local
+        else "",
+    )
+
+
+def _local(par_id, value):
+    return '<localParameter id="{}" value="{}"/>'.format(par_id, value)
+
+
+def _rule(kind, variable, math):
+    return '<{0} variable="{1}"><math {2}>{3}</math></{0}>'.format(
+        kind, variable, _MATHML, math
+    )
+
+
+def _initial_assignment(symbol, math):
+    return (
+        '<initialAssignment symbol="{}"><math {}>{}</math></initialAssignment>'.format(
+            symbol, _MATHML, math
+        )
+    )
+
+
+def _assert_matches_roadrunner(
+    sbml, species, tmax=5.0, n_points=50, rtol=2e-3, importer_kwargs=None
+):
+    """Compare amounts of *species* in the imported model to RoadRunner's"""
+    import numpy as np
+    import warnings as _warnings
+    from pysb.simulator import ScipyOdeSimulator
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        importer = SbmlImporter(sbml, **(importer_kwargs or {}))
+    tspan = np.linspace(0, tmax, n_points)
+    pysb_result = ScipyOdeSimulator(
+        importer.model, tspan=tspan, compiler="python"
+    ).run()
+
+    rr = _roadrunner.RoadRunner(sbml)
+    rr.integrator.relative_tolerance = 1e-10
+    rr.integrator.absolute_tolerance = 1e-14
+    rr_result = rr.simulate(0, tmax, n_points, selections=["time"] + list(species))
+
+    for j, sp_id in enumerate(species):
+        got = pysb_result.observables[importer._species_obs[sp_id].name]
+        expected = rr_result[:, j + 1]
+        scale = max(float(np.abs(expected).max()), 1e-12)
+        rel_err = float(np.abs(got - expected).max()) / scale
+        assert rel_err < rtol, "{}: relative error {:.2e} vs RoadRunner".format(
+            sp_id, rel_err
+        )
+
+
+def _require_roadrunner():
+    if not HAS_ROADRUNNER:
+        raise SkipTest("roadrunner (libroadrunner) not installed")
+
+
+def test_roadrunner_bimolecular_nonunit_compartment():
+    _require_roadrunner()
+    law = _times(_ci("cell"), _ci("k"), _ci("A"), _ci("B"))
+    for A, B in (
+        (_sp("A", "cell", conc=1.0), _sp("B", "cell", conc=2.0)),
+        (_sp("A", "cell", amount=2.0), _sp("B", "cell", amount=4.0)),
+    ):
+        sbml = _l3_sbml(
+            _cpt("cell", 2),
+            A + B + _sp("C", "cell", amount=0),
+            _par("k", 0.3),
+            reactions=_reaction("r", {"A": 1, "B": 1}, {"C": 1}, law),
+        )
+        _assert_matches_roadrunner(sbml, ["A", "B", "C"])
+
+
+def test_roadrunner_synthesis_and_degradation_nonunit_compartment():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("cell", 2),
+        _sp("A", "cell", amount=1) + _sp("B", "cell", conc=1),
+        _par("ks", 0.5) + _par("kd", 0.4),
+        reactions=_reaction("syn", {}, {"A": 1}, _times(_ci("cell"), _ci("ks")))
+        + _reaction("deg", {"B": 1}, {}, _times(_ci("cell"), _ci("kd"), _ci("B"))),
+    )
+    _assert_matches_roadrunner(sbml, ["A", "B"])
+
+
+def test_roadrunner_substance_units_species():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("cell", 2),
+        _sp("A", "cell", amount=3, hosu=True) + _sp("B", "cell", amount=0, hosu=True),
+        _par("k", 0.4),
+        reactions=_reaction("r", {"A": 1}, {"B": 1}, _times(_ci("k"), _ci("A"))),
+    )
+    _assert_matches_roadrunner(sbml, ["A", "B"])
+
+
+def test_roadrunner_boundary_reactant_nonunit_compartment():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("cell", 2),
+        _sp("S", "cell", conc=2, boundary=True) + _sp("P", "cell", amount=0),
+        _par("k", 0.4),
+        reactions=_reaction(
+            "r", {"S": 1}, {"P": 1}, _times(_ci("cell"), _ci("k"), _ci("S"))
+        ),
+    )
+    _assert_matches_roadrunner(sbml, ["P"])
+
+
+def test_roadrunner_reversible_nonunit_compartment():
+    _require_roadrunner()
+    law = _times(
+        _ci("cell"),
+        _apply(
+            "minus",
+            _times(_ci("kf"), _ci("A"), _ci("B")),
+            _times(_ci("kr"), _ci("C")),
+        ),
+    )
+    sbml = _l3_sbml(
+        _cpt("cell", 2),
+        _sp("A", "cell", conc=1) + _sp("B", "cell", conc=2) + _sp("C", "cell", conc=0),
+        _par("kf", 0.3) + _par("kr", 0.2),
+        reactions=_reaction("r", {"A": 1, "B": 1}, {"C": 1}, law, reversible=True),
+    )
+    _assert_matches_roadrunner(sbml, ["A", "B", "C"])
+
+
+def test_roadrunner_membrane_reaction():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("ext", 3, 3) + _cpt("mem", 0.5, 2),
+        _sp("L", "mem", amount=1.0)
+        + _sp("R", "mem", amount=2.0)
+        + _sp("LR", "mem", amount=0),
+        _par("k", 0.7),
+        reactions=_reaction(
+            "r",
+            {"L": 1, "R": 1},
+            {"LR": 1},
+            _times(_ci("mem"), _ci("k"), _ci("L"), _ci("R")),
+        ),
+    )
+    _assert_matches_roadrunner(sbml, ["L", "R", "LR"])
+
+
+def test_roadrunner_transport_between_compartments():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("a", 3) + _cpt("b", 0.5),
+        _sp("A", "a", conc=1)
+        + _sp("B", "b", conc=2)
+        + _sp("C", "a", conc=0)
+        + _sp("D", "b", conc=0),
+        _par("k", 0.3),
+        reactions=_reaction(
+            "r1", {"A": 1}, {"D": 1}, _times(_ci("a"), _ci("k"), _ci("A"))
+        )
+        + _reaction(
+            "r2",
+            {"A": 1, "B": 1},
+            {"C": 1},
+            _times(_ci("k"), _ci("A"), _ci("B")),
+        ),
+    )
+    _assert_matches_roadrunner(sbml, ["A", "B", "C", "D"])
+
+
+def test_roadrunner_symmetry_factors():
+    """Identical reactants, including partly kept ones (BNG symmetry factors)"""
+    _require_roadrunner()
+    cases = [
+        ({"A": 2}, {"A": 3}),
+        ({"A": 2}, {"A": 2, "B": 1}),
+        ({"A": 3}, {"A": 2, "B": 1}),
+        ({"A": 2}, {"B": 1, "A": 1}),
+        ({"A": 2}, {"B": 1}),
+        ({"A": 1, "B": 1}, {"B": 2, "A": 1}),
+        ({"A": 2, "B": 1}, {"A": 1, "B": 2}),
+    ]
+    for reactants, products in cases:
+        for volume in (1, 2):
+            law = _times(
+                _ci("k"),
+                *[
+                    _ci(sp_id) if n == 1 else _pow(sp_id, n)
+                    for sp_id, n in reactants.items()
+                ],
+            )
+            sbml = _l3_sbml(
+                _cpt("c", volume),
+                _sp("A", "c", amount=1.0) + _sp("B", "c", amount=0.4),
+                _par("k", 0.2),
+                reactions=_reaction("r", reactants, products, law),
+            )
+            try:
+                _assert_matches_roadrunner(sbml, ["A", "B"], tmax=2)
+            except AssertionError as exc:
+                raise AssertionError(
+                    "{} -> {} at V={}: {}".format(reactants, products, volume, exc)
+                )
+
+
+def test_roadrunner_local_parameters():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("c"),
+        _sp("A", "c", amount=1) + _sp("B", "c", amount=1),
+        _par("k", 5),
+        reactions=_reaction(
+            "r1", {"A": 1}, {}, _times(_ci("k"), _ci("A")), local=_local("k", 0.1)
+        )
+        + _reaction(
+            "r2", {"B": 1}, {}, _times(_ci("k"), _ci("B")), local=_local("k", 2.0)
+        ),
+    )
+    _assert_matches_roadrunner(sbml, ["A", "B"])
+
+
+def _decay(c_size, law_factor, parameters=None, **kwargs):
+    return _l3_sbml(
+        _cpt("c", c_size),
+        _sp("A", "c", amount=1),
+        _par("k", 0.3) + (parameters or ""),
+        reactions=_reaction("r", {"A": 1}, {}, _times(_ci("A"), law_factor)),
+        **kwargs,
+    )
+
+
+def test_roadrunner_parameter_sign_is_unrestricted():
+    _require_roadrunner()
+    for factor in (
+        _apply("abs", _apply("minus", _ci("k"))),
+        _apply("root", _pow("k", 2)),
+        _apply("max", _ci("k"), _cn(0)),
+    ):
+        _assert_matches_roadrunner(_decay(1, factor, version=2), ["A"])
+
+
+def test_roadrunner_mathml_functions():
+    _require_roadrunner()
+    logbase = "<apply><log/><logbase>{}</logbase>{}</apply>"
+    for factor in (
+        _times(_ci("k"), logbase.format(_cn(2), _cn(8))),
+        _times(_ci("k"), "<apply><log/>{}</apply>".format(_cn(100))),
+        _times(
+            _ci("k"),
+            "<apply><root/><degree>{}</degree>{}</apply>".format(_cn(3), _cn(8)),
+        ),
+        _times(_ci("k"), _apply("ceiling", _cn(1.2))),
+        _times(_ci("k"), "<exponentiale/>"),
+        _times(_ci("k"), _apply("arccosh", _cn(2))),
+        _times(
+            _ci("k"),
+            _apply("sec", _cn(1)),
+            _apply("arccoth", _cn(3)),
+            _apply("csch", _cn(1)),
+        ),
+        "<piecewise><piece>{}{}</piece><otherwise>{}</otherwise></piecewise>".format(
+            _cn(0.5),
+            _apply(
+                "lt",
+                '<csymbol encoding="text"'
+                ' definitionURL="http://www.sbml.org/sbml/symbols/time"> t </csymbol>',
+                _cn(2),
+            ),
+            _cn(0.1),
+        ),
+    ):
+        # a max() call needs Level 3 Version 2
+        sbml = _decay(1, factor, version=2)
+        _assert_matches_roadrunner(sbml, ["A"], n_points=501, rtol=5e-3)
+
+
+def test_roadrunner_initial_assignments():
+    _require_roadrunner()
+    rate = _reaction("r", {"A": 1}, {}, _times(_ci("k"), _ci("A")))
+    assignment = _initial_assignment("k", _times(_cn(2), _ci("k0")))
+
+    # Parameter with a placeholder value, and without any value
+    for k_par in (_par("k", 0.001), _par("k")):
+        sbml = _l3_sbml(
+            _cpt("c"),
+            _sp("A", "c", amount=1),
+            k_par + _par("k0", 0.3),
+            assignments=assignment,
+            reactions=rate,
+        )
+        _assert_matches_roadrunner(sbml, ["A"])
+
+    # Compartment size set by an assignment, species given as a concentration
+    sbml = _l3_sbml(
+        _cpt("c", 1),
+        _sp("A", "c", conc=1.5),
+        _par("v", 4.0),
+        assignments=_initial_assignment("c", _ci("v")),
+        reactions=_reaction("r", {"A": 1}, {}, _times(_ci("c"), _cn(0.3), _ci("A"))),
+    )
+    _assert_matches_roadrunner(sbml, ["A"])
+
+
+def test_roadrunner_net_flux_law_with_zero_reactant():
+    """A law that is not proportional to its reactants must not divide by zero"""
+    _require_roadrunner()
+    flux = _apply(
+        "divide",
+        _apply("minus", _times(_cn(10), _ci("S1")), _times(_cn(2), _ci("S2"))),
+        _apply("plus", _cn(1), _ci("S1"), _ci("S2")),
+    )
+    sbml = _l3_sbml(
+        _cpt("c"),
+        _sp("S1", "c", amount=0) + _sp("S2", "c", amount=1.0),
+        reactions=_reaction("r", {"S1": 1}, {"S2": 1}, flux)
+        + _reaction("r0", {}, {"S1": 1}, _cn(0.5)),
+    )
+    _assert_matches_roadrunner(sbml, ["S1", "S2"])
+
+
+def test_roadrunner_non_separable_reversible_law():
+    _require_roadrunner()
+    flux = _apply(
+        "divide",
+        _times(_ci("Vm"), _apply("minus", _ci("S"), _ci("P"))),
+        _apply("plus", _ci("Km"), _ci("S"), _ci("P")),
+    )
+    sbml = _l3_sbml(
+        _cpt("c", 2),
+        _sp("S", "c", conc=2) + _sp("P", "c", conc=0.5),
+        _par("Vm", 1) + _par("Km", 1),
+        reactions=_reaction("r", {"S": 1}, {"P": 1}, flux, reversible=True),
+    )
+    _assert_matches_roadrunner(sbml, ["S", "P"])
+
+
+def test_roadrunner_rate_rules_on_species():
+    _require_roadrunner()
+    law = _times(_ci("k"), _ci("X"))
+    for species in (
+        _sp("X", "c2", conc=1.0),  # concentration, not in the first compartment
+        _sp("X", "c2", amount=1.0, hosu=True),
+    ):
+        sbml = _l3_sbml(
+            _cpt("c1", 2) + _cpt("c2", 4),
+            species,
+            _par("k", 0.3),
+            rules=_rule("rateRule", "X", law),
+        )
+        _assert_matches_roadrunner(sbml, ["X"])
+
+
+def test_roadrunner_rate_rule_on_parameter_with_compartments():
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("c1", 2) + _cpt("c2", 4),
+        parameters=_par("k", 0.3) + _par("p", 1.0, constant=False),
+        rules=_rule("rateRule", "p", _times(_ci("k"), _ci("p"))),
+    )
+    importer = SbmlImporter(sbml)
+    from pysb.simulator import ScipyOdeSimulator
+    import numpy as np
+
+    t = np.linspace(0, 3, 20)
+    res = ScipyOdeSimulator(importer.model, tspan=t, compiler="python").run()
+    np.testing.assert_allclose(res.observables["obs_p"], np.exp(0.3 * t), rtol=1e-4)
+
+
+def test_roadrunner_assignment_rule_order_and_initial_assignment_dependency():
+    _require_roadrunner()
+    # k2 depends on k3, defined later; A's initial value depends on a rule
+    sbml = _l3_sbml(
+        _cpt("c"),
+        _sp("A", "c", amount=1),
+        _par("k", 0.3) + _par("k2", constant=False) + _par("k3", constant=False),
+        assignments=_initial_assignment("A", _times(_cn(2), _ci("k3"))),
+        rules=_rule("assignmentRule", "k2", _times(_cn(2), _ci("k3")))
+        + _rule("assignmentRule", "k3", _times(_cn(3), _ci("k"))),
+        reactions=_reaction("r", {"A": 1}, {}, _times(_ci("k2"), _ci("A"))),
+    )
+    _assert_matches_roadrunner(sbml, ["A"])
+
+
+def test_roadrunner_function_definition():
+    _require_roadrunner()
+    function = (
+        '<functionDefinition id="f"><math {}><lambda><bvar><ci>x</ci></bvar>'
+        "<bvar><ci>y</ci></bvar>{}</lambda></math></functionDefinition>"
+    ).format(_MATHML, _times(_ci("x"), _ci("y"), _cn(2)))
+    sbml = _l3_sbml(
+        _cpt("c", 2),
+        _sp("A", "c", conc=1),
+        _par("k", 0.3),
+        functions=function,
+        reactions=_reaction(
+            "r",
+            {"A": 1},
+            {},
+            "<apply><ci>f</ci>{}{}</apply>".format(_ci("k"), _ci("A")),
+        ),
+    )
+    _assert_matches_roadrunner(sbml, ["A"])
+
+
+def test_roadrunner_l2_outside_between_volumes():
+    """Level 2 models nest volumes with 'outside'; BNG must still run"""
+    _require_roadrunner()
+    sbml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sbml xmlns="http://www.sbml.org/sbml/level2/version4" level="2"'
+        ' version="4"><model id="m">'
+        '<listOfCompartments><compartment id="ext" size="2"/>'
+        '<compartment id="cyt" size="1" outside="ext"/></listOfCompartments>'
+        '<listOfSpecies><species id="A" compartment="cyt" initialConcentration="1"/>'
+        '<species id="B" compartment="ext" initialConcentration="0"/></listOfSpecies>'
+        '<listOfParameters><parameter id="k" value="0.3"/></listOfParameters>'
+        '<listOfReactions><reaction id="r"><listOfReactants>'
+        '<speciesReference species="A"/></listOfReactants><listOfProducts>'
+        '<speciesReference species="B"/></listOfProducts><kineticLaw>'
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/>'
+        "<ci>cyt</ci><ci>k</ci><ci>A</ci></apply></math></kineticLaw></reaction>"
+        "</listOfReactions></model></sbml>"
+    )
+    _assert_matches_roadrunner(sbml, ["A", "B"])
+
+
+# ---------------------------------------------------------------------------
+# Other review-driven behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_function_raises():
+    sbml = _l3_sbml(
+        _cpt("c"),
+        _sp("A", "c", amount=1),
+        _par("k", 0.3),
+        reactions=_reaction(
+            "r",
+            {"A": 1},
+            {},
+            "<apply><ci>nosuchfunction</ci>{}</apply>".format(_ci("k")),
+        ),
+    )
+    assert_raises_regex(SbmlImportError, "nosuchfunction", SbmlImporter, sbml)
+
+
+def test_unsupported_math_raises():
+    sbml = _l3_sbml(
+        _cpt("c"),
+        _sp("A", "c", amount=1),
+        _par("k", 0.3),
+        reactions=_reaction(
+            "r",
+            {"A": 1},
+            {},
+            '<apply><csymbol encoding="text" '
+            'definitionURL="http://www.sbml.org/sbml/symbols/delay"> delay '
+            "</csymbol>{}{}</apply>".format(_ci("A"), _cn(1)),
+        ),
+    )
+    assert_raises_regex(SbmlImportError, "delay", SbmlImporter, sbml)
+
+
+def test_parameter_without_value_or_assignment_warns():
+    import warnings as _warnings
+
+    sbml = _l3_sbml(_cpt("c"), _sp("A", "c", amount=1), _par("unused"))
+    with _warnings.catch_warnings(record=True) as w:
+        _warnings.simplefilter("always")
+        m = SbmlImporter(sbml).model
+    assert any("unused" in str(warning.message) for warning in w)
+    assert "unused" not in m.parameters.keys()
+
+
+def test_parameters_have_unrestricted_sign():
+    sbml = _l3_sbml(_cpt("c"), _sp("A", "c", amount=1), _par("E", -0.07))
+    m = SbmlImporter(sbml).model
+    assert m.parameters["E"].is_nonnegative is None
+    assert sympy.Abs(-m.parameters["E"]) == sympy.Abs(m.parameters["E"])
+
+
+def test_parameter_pickles():
+    import pickle
+
+    m = SbmlImporter(
+        _l3_sbml(_cpt("c"), _sp("A", "c", amount=1), _par("E", -0.07))
+    ).model
+    assert pickle.loads(pickle.dumps(m)).parameters["E"].value == -0.07
+
+
+def test_libsbml_importer_rejects_atomizer_kwargs():
+    sbml = _l3_sbml(_cpt("c"), _sp("A", "c", amount=1))
+    assert_raises_regex(TypeError, "atomize", model_from_sbml, sbml, atomize=True)
+
+
+def test_import_time_scales_gently_with_model_size():
+    """Building the namespace must not be repeated for every formula"""
+    import time
+
+    n = 100
+    species = "".join(
+        _sp("S{}".format(i), "c", amount=1 if i == 0 else 0) for i in range(n)
+    )
+    reactions = "".join(
+        _reaction(
+            "r{}".format(i),
+            {"S{}".format(i): 1},
+            {"S{}".format(i + 1): 1},
+            _times(_ci("k"), _ci("S{}".format(i))),
+        )
+        for i in range(n - 1)
+    )
+    sbml = _l3_sbml(_cpt("c"), species, _par("k", 0.1), reactions=reactions)
+    start = time.time()
+    SbmlImporter(sbml)
+    assert time.time() - start < 15
+
+
+def test_roadrunner_species_defined_by_assignment_rule():
+    """A species whose amount is set by an assignment rule is an Expression"""
+    _require_roadrunner()
+    sbml = _l3_sbml(
+        _cpt("c", 2),
+        _sp("A", "c", conc=1.0)
+        + _sp("T", "c", conc=0, boundary=True)
+        + _sp("P", "c", conc=0),
+        _par("k", 0.3),
+        rules=_rule("assignmentRule", "T", _times(_cn(3), _ci("A"))),
+        reactions=_reaction(
+            "r", {"A": 1}, {"P": 1}, _times(_ci("c"), _ci("k"), _ci("T"))
+        ),
+    )
+    _assert_matches_roadrunner(sbml, ["A", "P"])
+    importer = SbmlImporter(sbml)
+    assert "T" in importer.model.expressions.keys()
+    assert "T" not in importer.model.monomers.keys()
+
+
+def test_reversible_split_does_not_expand_large_laws():
+    """Splitting a reversible law distributes the sum without expanding powers
+    of sums, which would otherwise explode for large kinetic laws."""
+    _require_roadrunner()
+    inhibition = _apply(
+        "power",
+        _apply("plus", _cn(1), _apply("divide", _ci("S"), _ci("Ki"))),
+        _cn(6),
+    )
+    flux = _apply(
+        "divide",
+        _times(
+            _ci("Vm"),
+            _apply("minus", _ci("S"), _apply("divide", _ci("P"), _ci("Keq"))),
+        ),
+        _times(_apply("plus", _ci("Km"), _ci("S")), inhibition, inhibition),
+    )
+    sbml = _l3_sbml(
+        _cpt("c", 2),
+        _sp("S", "c", conc=2) + _sp("P", "c", conc=0.5),
+        _par("Vm", 1) + _par("Km", 1) + _par("Ki", 3) + _par("Keq", 2),
+        reactions=_reaction("r", {"S": 1}, {"P": 1}, flux, reversible=True),
+    )
+    importer = SbmlImporter(sbml)
+    assert {"r_fwd", "r_rev"} <= set(importer.model.rules.keys())
+    assert all(len(str(e.expr)) < 1000 for e in importer.model.expressions)
+    _assert_matches_roadrunner(sbml, ["S", "P"])
