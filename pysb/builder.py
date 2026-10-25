@@ -129,10 +129,13 @@ class Builder(object):
             values for this parameter, if the parameter should be included among
             the parameters to estimate (contained in the set
             ``Builder.estimate_params``).
-        nonnegative : bool, optional
+        nonnegative : bool or None, optional
             If True (default), the parameter is assumed to be non-negative and
-            an error is raised if a negative value is assigned.  Set to False
-            to allow negative values (e.g. reversal potentials).
+            an error is raised if a negative value is assigned.  Set to None
+            to allow negative values (e.g. reversal potentials) without
+            asserting anything about the sign in symbolic expressions. False
+            asserts that the parameter is negative, which is rarely what is
+            wanted.
         """
 
         if self.params_dict is None:
